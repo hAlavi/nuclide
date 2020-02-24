@@ -6,7 +6,7 @@
  * LICENSE file in the root directory of this source tree. An additional grant
  * of patent rights can be found in the PATENTS file in the same directory.
  *
- * @flow
+ * @flow strict-local
  * @format
  */
 
@@ -38,14 +38,14 @@ type ParsedPath = {
 };
 
 import invariant from 'assert';
-// eslint-disable-next-line rulesdir/prefer-nuclide-uri
+// eslint-disable-next-line nuclide-internal/prefer-nuclide-uri
 import pathModule from 'path';
 
 import os from 'os';
 import {maybeToString} from './string';
 
 const ARCHIVE_SEPARATOR = '!';
-const KNOWN_ARCHIVE_EXTENSIONS = ['.jar', '.zip'];
+const KNOWN_ARCHIVE_EXTENSIONS = [];
 
 const REMOTE_PATH_URI_PREFIX = 'nuclide://';
 // TODO(ljw): following regex is incorrect. A URI scheme must start with
@@ -54,14 +54,6 @@ const URI_PREFIX_REGEX = /^[A-Za-z0-9_-]+:\/\/.*/;
 
 function isRemote(uri: NuclideUri): boolean {
   return uri.startsWith(REMOTE_PATH_URI_PREFIX);
-}
-
-// When restoring Atom state on load, Atom mangles our remote URIs by
-// removing one of the '/'s. These TextBuffers/TextEditors live for a short time
-// and are destroyed during Nuclide startup.
-// On Windows, we further mangle the colon into an underscore to avoid an invalid drive prefix.
-function isBrokenDeserializedUri(uri: ?NuclideUri): boolean {
-  return uri != null && uri.match(/nuclide[:_][\\/][^/]/) != null;
 }
 
 // Atom often puts its URIs in places where we'd expect to see Nuclide URIs (or plain paths)
@@ -148,10 +140,6 @@ function parse(uri: NuclideUri): ParsedUrl {
   }
 
   invariant(
-    uri.indexOf('://') === -1,
-    'Nuclide URI must be either local file names or URLs starting with nuclide://',
-  );
-  invariant(
     !_endsWithArchiveSeparator(uri),
     `Path cannot end with archive separator. Failed to parse ${uri}`,
   );
@@ -196,6 +184,10 @@ function getHostnameOpt(remoteUri: ?NuclideUri): ?string {
 }
 
 function join(uri: NuclideUri, ...relativePath: Array<string>): NuclideUri {
+  return joinArray(uri, relativePath);
+}
+
+function joinArray(uri: NuclideUri, relativePath: Array<string>): NuclideUri {
   _testForIllegalUri(uri);
   const uriPathModule = _pathModuleFor(uri);
   if (isRemote(uri)) {
@@ -346,24 +338,19 @@ function _getWindowsPathFromWindowsFileUri(uri: string): ?string {
  * Returns null if not a valid file: URI.
  */
 function uriToNuclideUri(uri: string): ?string {
-  // TODO(ljw): the following check is incorrect. It's designed to support
-  // two-slash file URLs of the form "file://c:\path". But those are invalid
-  // file URLs, and indeed it fails to %-escape "file://c:\My%20Documents".
+  // file:// URIs should never normally contain Windows backslashes:
+  // e.g. vscode-uri escapes C:\abc to file:///c:/abc.
+  // This just handles any hacky users that simply prepended 'file://'.
+  // (vscode-uri does not know how to handle file://C:\abc.)
   const windowsPathFromUri = _getWindowsPathFromWindowsFileUri(uri);
-  // flowlint-next-line sketchy-null-string:off
-  if (windowsPathFromUri) {
-    // If the specified URI is a local file:// URI to a Windows path,
-    // handle specially first. url.parse() gets confused by the "X:"
-    // part of the Windows path and thinks the X is the name of a remote
-    // host.
+  if (windowsPathFromUri != null) {
     return windowsPathFromUri;
   }
 
   const lspUri = LspUri.parse(uri);
-
   if (lspUri.scheme === 'file' && lspUri.path) {
     // only handle real files for now.
-    return lspUri.path;
+    return lspUri.fsPath;
   } else if (isRemote(uri)) {
     return uri;
   } else {
@@ -384,7 +371,7 @@ function nuclideUriToUri(uri: NuclideUri): string {
 }
 
 /**
- * Returns true if child is equal to, or is a proper child of parent.
+ * Returns true if child is equal to, or is a proper descendant of parent.
  */
 function contains(parent: NuclideUri, child: NuclideUri): boolean {
   _testForIllegalUri(parent);
@@ -462,26 +449,31 @@ function registerHostnameFormatter(formatter: HostnameFormatter): IDisposable {
   };
 }
 
+function hostnameToDisplayHostname(hostname: string): string {
+  return hostFormatters.reduce((current, formatter) => {
+    const next = formatter(current);
+    if (next != null && next !== '') {
+      return next;
+    } else {
+      return current;
+    }
+  }, hostname);
+}
+
+function nuclideUriToDisplayHostname(uri: NuclideUri): string {
+  _testForIllegalUri(uri);
+  return isRemote(uri) ? hostnameToDisplayHostname(getHostname(uri)) : uri;
+}
+
 /**
  * NuclideUris should never be shown to humans.
  * This function returns a human usable string.
  */
 function nuclideUriToDisplayString(uri: NuclideUri): string {
   _testForIllegalUri(uri);
-  if (isRemote(uri)) {
-    let hostname = getHostname(uri);
-    for (const formatter of hostFormatters) {
-      const formattedHostname = formatter(hostname);
-      // flowlint-next-line sketchy-null-string:off
-      if (formattedHostname) {
-        hostname = formattedHostname;
-        break;
-      }
-    }
-    return `${hostname}:${getPath(uri)}`;
-  } else {
-    return uri;
-  }
+  return isRemote(uri)
+    ? `${nuclideUriToDisplayHostname(uri)}:${getPath(uri)}`
+    : uri;
 }
 
 function ensureTrailingSeparator(uri: NuclideUri): NuclideUri {
@@ -510,6 +502,11 @@ function endsWithSeparator(uri: NuclideUri): boolean {
   _testForIllegalUri(uri);
   const uriPathModule = _pathModuleFor(uri);
   return uri.endsWith(uriPathModule.sep);
+}
+
+function endsWithEdenDir(uri: NuclideUri): boolean {
+  _testForIllegalUri(uri);
+  return uri.endsWith('.eden');
 }
 
 function isAbsolute(uri: NuclideUri): boolean {
@@ -541,6 +538,11 @@ function resolve(uri: NuclideUri, ...paths: Array<string>): NuclideUri {
       uriPathModule.resolve.apply(null, paths),
     );
   }
+}
+
+function isHomeRelative(uri: NuclideUri): boolean {
+  _testForIllegalUri(uri);
+  return uri.startsWith('~');
 }
 
 function expandHomeDir(uri: NuclideUri): NuclideUri {
@@ -638,20 +640,16 @@ function isRoot(uri: NuclideUri): boolean {
 function parsePath(uri: NuclideUri): ParsedPath {
   _testForIllegalUri(uri);
   const uriPathModule = _pathModuleFor(uri);
-  if (!isInArchive(uri)) {
-    return uriPathModule.parse(getPath(uri));
-  } else {
-    const parsed = uriPathModule.parse(
-      _archiveEncode(uriPathModule, getPath(uri)),
-    );
-    return {
-      root: _archiveDecode(uriPathModule, parsed.root),
-      dir: _archiveDecode(uriPathModule, parsed.dir),
-      base: _archiveDecode(uriPathModule, parsed.base),
-      ext: _archiveDecode(uriPathModule, parsed.ext),
-      name: _archiveDecode(uriPathModule, parsed.name),
-    };
-  }
+  const parsed = uriPathModule.parse(
+    _archiveEncode(uriPathModule, getPath(uri)),
+  );
+  return {
+    root: _archiveDecode(uriPathModule, parsed.root),
+    dir: _archiveDecode(uriPathModule, parsed.dir),
+    base: _archiveDecode(uriPathModule, parsed.base),
+    ext: _archiveDecode(uriPathModule, parsed.ext),
+    name: _archiveDecode(uriPathModule, parsed.name),
+  };
 }
 
 function pathSeparatorFor(uri: NuclideUri): string {
@@ -696,6 +694,8 @@ function _pathModuleFor(uri: NuclideUri): typeof pathModule {
     return pathModule.win32;
   }
 
+  // This little russian roulette here is blocking T29990593. I didn't
+  // clean it because we might see posix paths on windows and vice versa.
   if (
     uri.split(pathModule.win32.sep).length >
     uri.split(pathModule.posix.sep).length
@@ -803,9 +803,6 @@ function _isArchiveSeparator(path: string, index: number): boolean {
 
 function _testForIllegalUri(uri: ?NuclideUri): void {
   if (uri != null) {
-    if (isAtomUri(uri)) {
-      throw new Error(`Path operation invoked on Atom URI ${uri}`);
-    }
     if (_endsWithArchiveSeparator(uri)) {
       throw new Error(
         `Path operation invoked on URI ending with ${ARCHIVE_SEPARATOR}: ${uri}`,
@@ -835,13 +832,30 @@ function validate(uri: NuclideUri, mustBeRemote?: boolean): void {
   }
 }
 
+const IMAGE_EXTENSIONS = new Set([
+  '.bmp',
+  '.gif',
+  '.ico',
+  '.jpeg',
+  '.jpg',
+  '.png',
+  '.webp',
+]);
+
+/**
+ * Returns true if this filename looks like an image that Nuclide can open; otherwise false.
+ */
+function looksLikeImageUri(uri: NuclideUri): boolean {
+  const ext = extname(uri).toLowerCase();
+  return IMAGE_EXTENSIONS.has(ext);
+}
+
 export default {
   basename,
   dirname,
   extname,
   stripExtension,
   isRemote,
-  isBrokenDeserializedUri,
   isLocal,
   createRemoteUri,
   isInArchive,
@@ -853,8 +867,10 @@ export default {
   getHostname,
   getHostnameOpt,
   join,
+  joinArray,
   archiveJoin,
   relative,
+  looksLikeImageUri,
   normalize,
   normalizeDir,
   getParent,
@@ -863,11 +879,15 @@ export default {
   contains,
   collapse,
   nuclideUriToDisplayString,
+  nuclideUriToDisplayHostname,
+  hostnameToDisplayHostname,
   registerHostnameFormatter,
   ensureTrailingSeparator,
   trimTrailingSeparator,
   endsWithSeparator,
+  endsWithEdenDir,
   isAbsolute,
+  isHomeRelative,
   resolve,
   expandHomeDir,
   splitPathList,

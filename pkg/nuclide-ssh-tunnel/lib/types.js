@@ -9,100 +9,119 @@
  * @format
  */
 
+import type {ResolvedTunnel} from 'nuclide-adb/lib/types';
 import type {NuclideUri} from 'nuclide-commons/nuclideUri';
-import type UniversalDisposable from 'nuclide-commons/UniversalDisposable';
 import type {Subject} from 'rxjs';
 import type {ConsoleMessage} from 'atom-ide-ui';
-import type {Directory} from '../../nuclide-remote-connection';
+import type {ActiveTunnels} from './ActiveTunnels';
 
-import * as Immutable from 'immutable';
-
-export type SshTunnelService = {
-  openTunnel(
-    tunnel: Tunnel,
-    onOpen: (?Error) => void,
-    onClose: (?Error) => void,
-  ): UniversalDisposable,
-  observeTunnels(
-    callback: (Immutable.Map<Tunnel, TunnelState>) => void,
-  ): IDisposable,
-  getOpenTunnels(): Set<Tunnel>,
-  getAvailableServerPort(uri: NuclideUri): Promise<number>,
-};
+import {Map, Set} from 'immutable';
 
 export type Store = {
+  subscribe(() => void): () => void,
   getState(): AppState,
   dispatch(action: Action): void,
 };
 
 export type AppState = {
-  openTunnels: Immutable.Map<Tunnel, OpenTunnel>,
-  currentWorkingDirectory: ?Directory,
+  openTunnels: Map<ResolvedTunnel, OpenTunnel>,
+  tunnels: ActiveTunnels,
+  currentWorkingDirectory: ?NuclideUri,
   consoleOutput: Subject<ConsoleMessage>,
 };
 
-export type Host = {
-  host: 'localhost' | NuclideUri,
-  port: number,
-  family?: 4 | 6,
+export type TunnelSubscription = {
+  description: string,
+  onTunnelClose: (?Error) => void,
 };
 
-export type Tunnel = {
-  description: string,
-  from: Host,
-  to: Host,
-};
+export type ActiveTunnel = $ReadOnly<{
+  tunnel: ResolvedTunnel,
+  subscriptions: Set<TunnelSubscription>,
+  state: TunnelState,
+  error: ?Error,
+  close?: (?Error) => void,
+}>;
 
 export type OpenTunnel = {
   close(error: ?Error): void,
   state: TunnelState,
 };
 
-export type TunnelState = 'initializing' | 'ready' | 'active';
+export type TunnelState = 'initializing' | 'ready' | 'active' | 'closing';
 
 export type Action =
-  | OpenTunnelAction
-  | AddOpenTunnelAction
   | CloseTunnelAction
+  | DeleteTunnelAction
+  | OpenTunnelAction
+  | RequestTunnelAction
+  | SetCurrentWorkingDirectoryAction
   | SetTunnelStateAction
-  | SetCurrentWorkingDirectoryAction;
-
-export type OpenTunnelAction = {
-  type: 'OPEN_TUNNEL',
-  payload: {
-    tunnel: Tunnel,
-    onOpen: (?Error) => void,
-    onClose: (?Error) => void,
-  },
-};
-
-export type AddOpenTunnelAction = {
-  type: 'ADD_OPEN_TUNNEL',
-  payload: {
-    tunnel: Tunnel,
-    close: (?Error) => void,
-  },
-};
+  | SubscribeToTunnelAction
+  | UnsubscribeFromTunnelAction;
 
 export type CloseTunnelAction = {
   type: 'CLOSE_TUNNEL',
   payload: {
-    tunnel: Tunnel,
+    tunnel: ResolvedTunnel,
     error: ?Error,
   },
 };
 
-export type SetTunnelStateAction = {
-  type: 'SET_TUNNEL_STATE',
+export type DeleteTunnelAction = {
+  type: 'DELETE_TUNNEL',
   payload: {
-    tunnel: Tunnel,
-    state: TunnelState,
+    tunnel: ResolvedTunnel,
+  },
+};
+
+export type OpenTunnelAction = {
+  type: 'OPEN_TUNNEL',
+  payload: {
+    tunnel: ResolvedTunnel,
+    open: () => void,
+    close: (?Error) => void,
+  },
+};
+
+export type RequestTunnelAction = {
+  type: 'REQUEST_TUNNEL',
+  payload: {
+    description: string,
+    tunnel: ResolvedTunnel,
+    onOpen: (?Error) => void,
+    onClose: (?Error) => void,
   },
 };
 
 export type SetCurrentWorkingDirectoryAction = {
   type: 'SET_CURRENT_WORKING_DIRECTORY',
   payload: {
-    directory: ?Directory,
+    directory: ?string,
+  },
+};
+
+export type SetTunnelStateAction = {
+  type: 'SET_TUNNEL_STATE',
+  payload: {
+    tunnel: ResolvedTunnel,
+    state: TunnelState,
+  },
+};
+
+export type SubscribeToTunnelAction = {
+  type: 'SUBSCRIBE_TO_TUNNEL',
+  payload: {
+    onOpen: (?Error) => void,
+    subscription: TunnelSubscription,
+    tunnel: ResolvedTunnel,
+  },
+};
+
+export type UnsubscribeFromTunnelAction = {
+  type: 'UNSUBSCRIBE_FROM_TUNNEL',
+  payload: {
+    subscription: TunnelSubscription,
+    tunnel: ResolvedTunnel,
   },
 };

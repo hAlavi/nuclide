@@ -25,7 +25,7 @@ import {maybeToString} from 'nuclide-commons/string';
 import querystring from 'querystring';
 import {repositoryForPath} from '../../nuclide-vcs-base';
 import {shortNameForAuthor as shortNameForAuthorFn} from './util';
-import {track} from '../../nuclide-analytics';
+import {track} from 'nuclide-analytics';
 import UniversalDisposable from 'nuclide-commons/UniversalDisposable';
 import url from 'url';
 import * as React from 'react';
@@ -68,17 +68,18 @@ class Activation {
     // (or at least reduce) the logic here.
 
     this._subscriptions.add(
-      atom.commands.add(
-        'atom-text-editor',
-        'nuclide-vcs-log:show-log-for-active-editor',
-        () => {
-          const uri = getActiveTextEditorURI();
-          if (uri != null) {
-            openLogPaneForURI(uri);
-            track('nuclide-vcs-log:open-from-text-editor');
-          }
+      atom.commands.add('atom-text-editor', {
+        'nuclide-vcs-log:show-log-for-active-editor': {
+          description: 'Show File History',
+          didDispatch: () => {
+            const uri = getActiveTextEditorURI();
+            if (uri != null) {
+              openLogPaneForURI(uri);
+              track('nuclide-vcs-log:open-from-text-editor');
+            }
+          },
         },
-      ),
+      }),
       atom.contextMenu.add({
         'atom-text-editor': [
           {
@@ -183,7 +184,7 @@ function openLogPaneForURI(uri: string) {
       [VCS_LOG_URI_PATHS_QUERY_PARAM]: uri,
     });
   // Not a file URI
-  // eslint-disable-next-line rulesdir/atom-apis
+  // eslint-disable-next-line nuclide-internal/atom-apis
   atom.workspace.open(openerURI);
 }
 
@@ -224,7 +225,7 @@ function createLogPaneForPath(path: string): ?React.Element<any> {
   const contentLoader = currentDiff.switchMap(ids => {
     const {oldId, newId} = ids;
     if (oldId == null || newId == null) {
-      return Observable.of({oldContent: null, newContent: null});
+      return Observable.of({oldContent: null, newContent: null, error: null});
     }
     return Observable.forkJoin(
       oldId !== ''
@@ -235,7 +236,18 @@ function createLogPaneForPath(path: string): ?React.Element<any> {
         : Observable.of(''),
     )
       .startWith([null, null])
-      .map(([oldContent, newContent]) => ({oldContent, newContent}));
+      .map(([oldContent, newContent]) => ({
+        oldContent,
+        newContent,
+        error: null,
+      }))
+      .catch(error => {
+        return Observable.of({
+          oldContent: null,
+          newContent: null,
+          error: error.toString(),
+        });
+      });
   });
 
   const props = Observable.combineLatest(
@@ -250,6 +262,7 @@ function createLogPaneForPath(path: string): ?React.Element<any> {
       repository,
       onDiffClick,
       logEntries,
+      fileLoadingError: content.error,
       oldContent: content.oldContent,
       newContent: content.newContent,
     };

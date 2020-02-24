@@ -6,30 +6,47 @@
  * LICENSE file in the root directory of this source tree. An additional grant
  * of patent rights can be found in the PATENTS file in the same directory.
  *
- * @flow
+ * @flow strict-local
  * @format
  */
 
+import type Breakpoint from './Breakpoint';
 import type {Command} from './Command';
+import type {ConsoleIO} from './ConsoleIO';
 import type {DebuggerInterface} from './DebuggerInterface';
+
+import {breakpointFromArgList} from './BreakpointCommandUtils';
+import TokenizedLine from './TokenizedLine';
 
 export default class BreakpointDisableCommand implements Command {
   name = 'disable';
-  helpText = '[index]: temporarily disables a breakpoint.';
+  helpText =
+    "[index | 'all']: temporarily disables a breakpoint, or all breakpoints. With no arguments, disables the current breakpoint.";
 
+  _console: ConsoleIO;
   _debugger: DebuggerInterface;
 
-  constructor(debug: DebuggerInterface) {
+  constructor(con: ConsoleIO, debug: DebuggerInterface) {
+    this._console = con;
     this._debugger = debug;
   }
 
-  async execute(args: string[]): Promise<void> {
-    let index = -1;
+  async execute(line: TokenizedLine): Promise<void> {
+    const args = line.stringTokens().slice(1);
 
-    if (args.length !== 1 || isNaN((index = parseInt(args[0], 10)))) {
-      throw new Error("Format is 'breakpoint disable index'");
+    const bpt: ?Breakpoint = breakpointFromArgList(
+      this._debugger,
+      args,
+      this.name,
+    );
+
+    if (bpt == null) {
+      await this._debugger.setAllBreakpointsEnabled(false);
+      this._console.outputLine('All breakpoins disabled.');
+      return;
     }
 
-    await this._debugger.setBreakpointEnabled(index, false);
+    await this._debugger.setBreakpointEnabled(bpt, false);
+    this._console.outputLine(`Breakpoint #${bpt.index} disabled.`);
   }
 }

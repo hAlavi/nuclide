@@ -10,14 +10,14 @@
  */
 
 import log4js from 'log4js';
+import {setupLoggingService, getPathToLogDir} from '../../nuclide-logging';
 import nuclideUri from 'nuclide-commons/nuclideUri';
-import os from 'os';
 import {IConnection} from 'vscode-languageserver';
 
 const MAX_LOG_SIZE = 16 * 1024;
 const MAX_LOG_BACKUPS = 1;
 const LOG_FILE_PATH = nuclideUri.join(
-  os.tmpdir(),
+  getPathToLogDir(),
   'nuclide-js-imports-server.log',
 );
 
@@ -28,11 +28,12 @@ const LOG_FILE_PATH = nuclideUri.join(
 // Additionally, add an appender to log over the rpc connection so logging appears
 // in the client environment, independent of stdio, node rpc, socket, etc.
 export default function initializeLogging(connection: IConnection) {
+  setupLoggingService();
   log4js.configure({
     appenders: [
       {
         type: 'logLevelFilter',
-        level: 'DEBUG',
+        level: 'WARN',
         appender: {
           connection,
           type: require.resolve(
@@ -51,6 +52,7 @@ export default function initializeLogging(connection: IConnection) {
 
 export function initializeLoggerForWorker(): void {
   // TODO: Ideally worker messages would go to the parent, which could send them back to the client.
+  setupLoggingService();
   log4js.configure({
     appenders: [
       {

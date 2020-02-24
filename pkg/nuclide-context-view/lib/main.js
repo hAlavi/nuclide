@@ -5,7 +5,7 @@
  * This source code is licensed under the license found in the LICENSE file in
  * the root directory of this source tree.
  *
- * @flow
+ * @flow strict-local
  * @format
  */
 
@@ -76,7 +76,7 @@ export function getHomeFragments(): HomeFragments {
       description:
         'Easily navigate between symbols and their definitions in your code',
       command: () => {
-        // eslint-disable-next-line rulesdir/atom-apis
+        // eslint-disable-next-line nuclide-internal/atom-apis
         atom.workspace.open(WORKSPACE_VIEW_URI, {searchAllPanes: true});
       },
     },

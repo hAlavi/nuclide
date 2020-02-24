@@ -5,15 +5,17 @@
  * This source code is licensed under the license found in the LICENSE file in
  * the root directory of this source tree.
  *
- * @flow
+ * @flow strict-local
  * @format
  */
 
-import type {Action, AppState, Device} from '../types';
-import type {Expected} from '../../../commons-node/expected';
+import type {Action, AppState} from '../types';
+import type {Device} from 'nuclide-debugger-common/types';
+import type {Expected} from 'nuclide-commons/expected';
 
 import * as Actions from './Actions';
-import {Expect} from '../../../commons-node/expected';
+import * as Immutable from 'immutable';
+import {Expect} from 'nuclide-commons/expected';
 
 export function app(state: AppState, action: Action): AppState {
   switch (action.type) {
@@ -22,12 +24,12 @@ export function app(state: AppState, action: Action): AppState {
       return {
         ...state,
         device: null,
-        devices: Expect.pendingValue([]),
-        infoTables: Expect.pendingValue(new Map()),
-        processes: Expect.pendingValue([]),
-        actions: [],
+        devices: Expect.pending(),
+        deviceTasks: new Map(),
+        infoTables: Expect.pending(),
+        processes: Expect.pending(),
         processTasks: [],
-        deviceTypeComponents: [],
+        deviceTypeComponents: Immutable.Map(),
         isDeviceConnected: false,
         host,
       };
@@ -41,12 +43,12 @@ export function app(state: AppState, action: Action): AppState {
         ...state,
         deviceType,
         device: null,
-        devices: Expect.pendingValue([]),
-        infoTables: Expect.pendingValue(new Map()),
-        processes: Expect.pendingValue([]),
-        actions: [],
+        devices: Expect.pending(),
+        deviceTasks: new Map(),
+        infoTables: Expect.pending(),
+        processes: Expect.pending(),
         processTasks: [],
-        deviceTypeComponents: [],
+        deviceTypeComponents: Immutable.Map(),
         isDeviceConnected: false,
       };
 
@@ -145,11 +147,11 @@ function isDeviceConnected(
   device: ?Device,
   deviceList: Expected<Device[]>,
 ): boolean {
-  if (device == null || deviceList.isError) {
+  if (device == null || !deviceList.isValue) {
     return false;
   }
   for (const _device of deviceList.value) {
-    if (device.name === _device.name) {
+    if (device.identifier === _device.identifier) {
       return true;
     }
   }

@@ -19,26 +19,28 @@ import type {
   TaskRunner,
   ToolbarStatePreference,
 } from './types';
-import type {CwdApi} from '../../nuclide-current-working-directory/lib/CwdApi';
+import type CwdApi from '../../nuclide-current-working-directory/lib/CwdApi';
 import type {DistractionFreeModeProvider} from '../../nuclide-distraction-free-mode';
 import type {ConsoleService} from 'atom-ide-ui';
 
+import {bindObservableAsProps} from 'nuclide-commons-ui/bindObservableAsProps';
+import {renderReactRoot} from 'nuclide-commons-ui/renderReactRoot';
+import {combineEpicsFromImports} from 'nuclide-commons/epicHelpers';
 import syncAtomCommands from '../../commons-atom/sync-atom-commands';
+import {track} from 'nuclide-analytics';
 import createPackage from 'nuclide-commons-atom/createPackage';
 import {LocalStorageJsonTable} from '../../commons-atom/LocalStorageJsonTable';
-import PanelRenderer from '../../commons-atom/PanelRenderer';
 import {observableFromSubscribeFunction} from 'nuclide-commons/event';
+import {memoize} from 'lodash';
 import {arrayEqual} from 'nuclide-commons/collection';
-import {
-  combineEpics,
-  createEpicMiddleware,
-} from 'nuclide-commons/redux-observable';
+import {createEpicMiddleware} from 'nuclide-commons/redux-observable';
+import observableFromReduxStore from 'nuclide-commons/observableFromReduxStore';
 import UniversalDisposable from 'nuclide-commons/UniversalDisposable';
 import * as Actions from './redux/Actions';
 import * as Epics from './redux/Epics';
 import * as Reducers from './redux/Reducers';
-import {trackingMiddleware} from './trackingMiddleware';
-import {createPanelItem} from './ui/createPanelItem';
+import getToolbarProps from './ui/getToolbarProps';
+import Toolbar from './ui/Toolbar';
 import invariant from 'assert';
 import {
   applyMiddleware,
@@ -47,7 +49,7 @@ import {
   createStore,
 } from 'redux';
 import {Observable} from 'rxjs';
-import {makeToolbarButtonSpec} from 'nuclide-commons-ui/ToolbarUtils';
+import * as React from 'react';
 
 // TODO: use a more general versioning mechanism.
 // Perhaps Atom should provide packages with some way of doing this.
@@ -56,6 +58,7 @@ const SERIALIZED_VERSION = 2;
 const COMMON_TASK_TYPES = ['build', 'run', 'test', 'debug'];
 
 function getVisible(event: Event): ?boolean {
+  // $FlowFixMe(>=0.68.0) Flow suppress (T27187857)
   if (event.detail != null && typeof event.detail === 'object') {
     const {visible} = event.detail;
     return visible != null ? Boolean(visible) : null;
@@ -66,7 +69,7 @@ function getVisible(event: Event): ?boolean {
 class Activation {
   _disposables: UniversalDisposable;
   _actionCreators: BoundActionCreators;
-  _panelRenderer: PanelRenderer;
+  _panel: atom$Panel;
   _store: Store;
 
   constructor(rawState: ?SerializedAppState): void {
@@ -85,30 +88,41 @@ class Activation {
       'nuclide:nuclide-task-runner:working-root-preferences',
     );
 
-    const epics = Object.keys(Epics)
-      .map(k => Epics[k])
-      .filter(epic => typeof epic === 'function');
+    const initialVisibility = getInitialVisibility(
+      serializedState,
+      preferencesForWorkingRoots,
+    );
+
+    track('nuclide-task-runner:initialized', {
+      visible: initialVisibility,
+    });
+
     const epicOptions = {preferencesForWorkingRoots};
     const rootEpic = (actions, store) =>
-      combineEpics(...epics)(actions, store, epicOptions);
+      combineEpicsFromImports(Epics, 'nuclide-task-runner')(
+        actions,
+        store,
+        epicOptions,
+      );
     this._store = createStore(
       combineReducers(Reducers),
-      {
-        visible: getInitialVisibility(
-          serializedState,
-          preferencesForWorkingRoots,
-        ),
-      },
-      applyMiddleware(createEpicMiddleware(rootEpic), trackingMiddleware),
+      {visible: initialVisibility},
+      applyMiddleware(createEpicMiddleware(rootEpic)),
     );
-    const states: Observable<AppState> = Observable.from(this._store)
+    const states: Observable<AppState> = observableFromReduxStore(this._store)
       .filter((state: AppState) => state.initialPackagesActivated)
       .distinctUntilChanged()
       .share();
     this._actionCreators = bindActionCreators(Actions, this._store.dispatch);
-    this._panelRenderer = new PanelRenderer({
-      location: 'top',
-      createItem: () => createPanelItem(this._store),
+    this._panel = atom.workspace.addTopPanel({
+      item: {
+        getElement: memoize(() => {
+          const props = getToolbarProps(this._store);
+          const StatefulToolbar = bindObservableAsProps(props, Toolbar);
+          return renderReactRoot(<StatefulToolbar />, 'TaskRunnerToolbarRoot');
+        }),
+      },
+      visible: false,
     });
 
     this._disposables = new UniversalDisposable(
@@ -116,7 +130,9 @@ class Activation {
       activateInitialPackagesObservable().subscribe(() => {
         this._store.dispatch(Actions.didActivateInitialPackages());
       }),
-      this._panelRenderer,
+      () => {
+        this._panel.destroy();
+      },
       atom.commands.add('atom-workspace', {
         'nuclide-task-runner:toggle-toolbar-visibility': event => {
           this._actionCreators.requestToggleToolbarVisibility(
@@ -144,8 +160,9 @@ class Activation {
           'atom-workspace': {
             [`nuclide-task-runner:${taskRunner.name
               .toLowerCase()
-              .replace(' ', '-')}-${taskMeta.type}`]: () => {
-              this._actionCreators.runTask({...taskMeta, taskRunner});
+              .replace(' ', '-')}-${taskMeta.type}`]: event => {
+              const {detail} = (event: any);
+              this._actionCreators.runTask(taskRunner, taskMeta, detail);
             },
           },
         }),
@@ -183,10 +200,11 @@ class Activation {
         taskMeta => ({
           'atom-workspace': {
             [`nuclide-task-runner:${taskMeta.type}`]: () => {
-              this._actionCreators.runTask({
-                ...taskMeta,
-                taskRunner: this._store.getState().activeTaskRunner,
-              });
+              const taskRunner: ?TaskRunner = this._store.getState()
+                .activeTaskRunner;
+              if (taskRunner != null) {
+                this._actionCreators.runTask(taskRunner, taskMeta);
+              }
             },
           },
         }),
@@ -221,7 +239,11 @@ class Activation {
         .map(state => state.visible)
         .distinctUntilChanged()
         .subscribe(visible => {
-          this._panelRenderer.render({visible});
+          if (visible) {
+            this._panel.show();
+          } else {
+            this._panel.hide();
+          }
         }),
       // Add a "stop" command when a task is running.
       states
@@ -235,7 +257,7 @@ class Activation {
                     new UniversalDisposable(
                       atom.commands.add(
                         'atom-workspace',
-                        // eslint-disable-next-line rulesdir/atom-apis
+                        // eslint-disable-next-line nuclide-internal/atom-apis
                         'nuclide-task-runner:stop-task',
                         () => {
                           this._actionCreators.stopTask();
@@ -257,9 +279,7 @@ class Activation {
     let pkg = this;
     const cwdSubscription = api.observeCwd(directory => {
       invariant(pkg != null, 'callback invoked after package deactivated');
-      pkg._actionCreators.setProjectRoot(
-        directory == null ? null : directory.getPath(),
-      );
+      pkg._actionCreators.setProjectRoot(directory);
     });
     this._disposables.add(cwdSubscription, () => {
       pkg = null;
@@ -278,20 +298,17 @@ class Activation {
     toolBar.addSpacer({
       priority: 400,
     });
-    const {element} = toolBar.addButton(
-      makeToolbarButtonSpec({
-        callback: 'nuclide-task-runner:toggle-toolbar-visibility',
-        tooltip: 'Toggle Task Runner Toolbar',
-        iconset: 'ion',
-        icon: 'play',
-        priority: 401,
-      }),
-    );
+    const {element} = toolBar.addButton({
+      callback: 'nuclide-task-runner:toggle-toolbar-visibility',
+      tooltip: 'Toggle Task Runner Toolbar',
+      iconset: 'ion',
+      icon: 'play',
+      priority: 401,
+    });
     element.className += ' nuclide-task-runner-tool-bar-button';
 
     const buttonUpdatesDisposable = new UniversalDisposable(
-      // $FlowFixMe: Update rx defs to accept ish with Symbol.observable
-      Observable.from(this._store).subscribe((state: AppState) => {
+      observableFromReduxStore(this._store).subscribe((state: AppState) => {
         if (state.taskRunners.count() > 0) {
           element.removeAttribute('hidden');
         } else {
@@ -394,7 +411,6 @@ class Activation {
 createPackage(module.exports, Activation);
 
 function activateInitialPackagesObservable(): Observable<void> {
-  // flowlint-next-line sketchy-null-mixed:off
   if (atom.packages.hasActivatedInitialPackages) {
     return Observable.of(undefined);
   }

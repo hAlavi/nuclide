@@ -6,58 +6,47 @@
  * LICENSE file in the root directory of this source tree. An additional grant
  * of patent rights can be found in the PATENTS file in the same directory.
  *
- * @flow
+ * @flow strict-local
  * @format
  */
 
 export type {
-  AtomNotification,
   AtomNotificationType,
   ControlButtonSpecification,
-  DebuggerCapabilities,
   DebuggerConfigAction,
-  DebuggerInstanceInterface,
-  DebuggerProperties,
+  DebuggerConfigurationProvider,
+  DebuggerSourcePathsService,
+  Device,
+  DevicePanelServiceApi,
+  IProcessConfig,
+  IVspInstance,
   MessageProcessor,
   NuclideDebuggerProvider,
-  NuclideEvaluationExpression,
-  NuclideEvaluationExpressionProvider,
-  UserOutput,
   VSAdapterExecutableInfo,
   VsAdapterType,
 } from './types';
 
-export {default as ClientCallback} from './ClientCallback';
+export {
+  getVSCodeDebuggerAdapterServiceByNuclideUri,
+} from './debug-adapter-service';
+
 export {
   default as DebuggerLaunchAttachProvider,
 } from './DebuggerLaunchAttachProvider';
 
-export {
-  DebuggerRpcServiceBase,
-  DebuggerRpcWebSocketService,
-} from './DebuggerRpcServiceBase';
-
-export {
-  translateMessageFromServer,
-  translateMessageToServer,
-} from './ChromeMessageRemoting';
-
-export {default as DebuggerInstance} from './DebuggerInstance';
-export {default as DebuggerProcessInfo} from './DebuggerProcessInfo';
-
 export {default as VsDebugSession} from './VsDebugSession';
-export {default as VsDebugSessionTranslator} from './VsDebugSessionTranslator';
 
-export {default as FileCache} from './FileCache';
-
-export {VsAdapterTypes} from './constants';
-
-export {pathToUri, uriToPath} from './helpers';
-export {getDefaultEvaluationExpression} from './evaluationExpression';
+export {VsAdapterTypes, VsAdapterNames} from './constants';
 
 export {
   deserializeDebuggerConfig,
   serializeDebuggerConfig,
 } from './DebuggerConfigSerializer';
+
+export {
+  localToRemoteProcessor,
+  pathProcessor,
+  remoteToLocalProcessor,
+} from './processors';
 
 export {default as VsAdapterSpawner} from './VsAdapterSpawner';

@@ -5,7 +5,7 @@
  * This source code is licensed under the license found in the LICENSE file in
  * the root directory of this source tree.
  *
- * @flow
+ * @flow strict-local
  * @format
  */
 
@@ -13,11 +13,12 @@ import invariant from 'assert';
 import fs from 'fs';
 import {getLogger} from 'log4js';
 import {Deferred} from 'nuclide-commons/promise';
-import {getOutputStream} from 'nuclide-commons/process';
+import {getOutputStream, ProcessExitError} from 'nuclide-commons/process';
 import {Observable} from 'rxjs';
 import {StreamTransport} from '../../nuclide-rpc';
 
 const PIPE_FD = 3;
+const NUCLIDE_E2E_TEST = 'NUCLIDE_E2E_TEST';
 
 export class IpcServerTransport {
   _transport: StreamTransport;
@@ -59,6 +60,17 @@ export class IpcClientTransport {
         ),
       )
       .switchMap(process => getOutputStream(process))
+      .do(message => {
+        if (process.env[NUCLIDE_E2E_TEST] != null) {
+          if (
+            message &&
+            (message.kind === 'stdout' || message.kind === 'stderr')
+          ) {
+            // eslint-disable-next-line no-console
+            console.log(`[IPC ${message.kind}]`, message.data);
+          }
+        }
+      })
       .subscribe({
         error: err => {
           this._handleError(err);
@@ -90,10 +102,26 @@ export class IpcClientTransport {
         },
       });
     }
+    let detail;
+    if (err instanceof ProcessExitError) {
+      let {stderr} = err;
+      if (stderr != null) {
+        const lines = stderr.split('\n');
+        const startIndex = lines.findIndex(line =>
+          line.includes('chrome-devtools://'),
+        );
+        if (startIndex !== -1) {
+          stderr = lines.slice(startIndex + 1).join('\n');
+        }
+      }
+      detail = `Exit code: ${String(err.exitCode)}\nstderr: ${stderr}`;
+    } else {
+      detail = String(err);
+    }
     atom.notifications.addError('Local RPC process crashed!', {
       description:
         'The local Nuclide RPC process crashed. Please reload Atom to continue.',
-      detail: String(err),
+      detail,
       dismissable: true,
       buttons,
     });

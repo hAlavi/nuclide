@@ -9,11 +9,11 @@
  * @format
  */
 
-import type {ConsoleMessage, OutputProviderStatus} from 'atom-ide-ui';
+import type {ConsoleMessage, ConsoleSourceStatus} from 'atom-ide-ui';
 import type {ConnectableObservable} from 'rxjs';
 
 import UniversalDisposable from 'nuclide-commons/UniversalDisposable';
-import {track} from '../../nuclide-analytics';
+import {track} from 'nuclide-analytics';
 import {getLogger} from 'log4js';
 import {BehaviorSubject, Observable, Subscription} from 'rxjs';
 
@@ -68,7 +68,7 @@ export class LogTailer {
   _runningCallbacks: Array<(err?: Error) => mixed>;
   _errorHandler: ?(err: Error) => void;
   _startCount: number;
-  _statuses: BehaviorSubject<OutputProviderStatus>;
+  _statuses: BehaviorSubject<ConsoleSourceStatus>;
 
   constructor(options: Options) {
     this._name = options.name;
@@ -79,7 +79,6 @@ export class LogTailer {
       options.ready == null
         ? null
         : // Guard against a never-ending ready stream.
-          // $FlowFixMe: Add `materialize()` to Rx defs
           options.ready.takeUntil(messages.materialize().takeLast(1));
     this._runningCallbacks = [];
     this._startCount = 0;
@@ -93,7 +92,7 @@ export class LogTailer {
         complete: () => {
           // If the process completed without ever entering the "running" state, invoke the
           // `onRunning` callback with a cancellation error.
-          this._invokeRunningCallbacks(new ProcessCancelledError(this._name));
+          this._invokeRunningCallbacks(new ProcessCanceledError(this._name));
           this._stop();
         },
       })
@@ -148,6 +147,7 @@ export class LogTailer {
       .publish();
 
     // Whenever the status becomes "running," invoke all of the registered running callbacks.
+    // eslint-disable-next-line nuclide-internal/unused-subscription
     this._statuses
       .distinctUntilChanged()
       .filter(status => status === 'running')
@@ -166,11 +166,8 @@ export class LogTailer {
 
   stop(): void {
     // If the process is explicitly stopped, call all of the running callbacks with a cancellation
-    // error.
-    this._startCount = 0;
-    this._runningCallbacks.forEach(cb => {
-      cb(new ProcessCancelledError(this._name));
-    });
+    // error. We don't care if the error was handled or not.
+    this._invokeRunningCallbacks(new ProcessCanceledError(this._name));
 
     this._stop();
   }
@@ -181,11 +178,11 @@ export class LogTailer {
     this._start(false);
   }
 
-  observeStatus(cb: (status: OutputProviderStatus) => void): IDisposable {
+  observeStatus(cb: (status: ConsoleSourceStatus) => void): IDisposable {
     return new UniversalDisposable(this._statuses.subscribe(cb));
   }
 
-  getStatus(): OutputProviderStatus {
+  getStatus(): ConsoleSourceStatus {
     return this._statuses.getValue();
   }
 
@@ -212,7 +209,7 @@ export class LogTailer {
   }
 
   _start(trackCall: boolean): void {
-    // eslint-disable-next-line rulesdir/atom-apis
+    // eslint-disable-next-line nuclide-internal/atom-apis
     atom.workspace.open(CONSOLE_VIEW_URI, {searchAllPanes: true});
 
     const currentStatus = this._statuses.getValue();
@@ -272,7 +269,7 @@ export class LogTailer {
   }
 }
 
-class ProcessCancelledError extends Error {
+class ProcessCanceledError extends Error {
   constructor(logProducerName: string) {
     super(`${logProducerName} was stopped`);
     this.name = 'ProcessCancelledError';

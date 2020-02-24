@@ -13,11 +13,11 @@ import {Emitter} from 'atom';
 import {isValidTextEditor} from 'nuclide-commons-atom/text-editor';
 import {arrayCompact} from 'nuclide-commons/collection';
 import UniversalDisposable from 'nuclide-commons/UniversalDisposable';
-import {isGkEnabled, onceGkInitialized} from '../../commons-node/passesGK';
+import {isGkEnabled, onceGkInitialized} from 'nuclide-commons/passesGK';
 import {maybeToString} from 'nuclide-commons/string';
 
 import {getLogger} from 'log4js';
-import {track} from '../../nuclide-analytics';
+import {track} from 'nuclide-analytics';
 
 import {NuxStore} from './NuxStore';
 import {NuxTour} from './NuxTour';
@@ -119,7 +119,7 @@ export class NuxManager {
           const error = `NuxView #${index} for "${
             nuxTourModel.id
           }" failed to instantiate.`;
-          logger.error(`ERROR: ${error}`);
+          logger.error(`ERROR: ${error}`, err);
           this._track(
             nuxTourModel.id,
             nuxTourModel.name,
@@ -187,15 +187,13 @@ export class NuxManager {
    * 'editor' and its `isReady` function returns to `true`.
    * Called every time the active pane item changes.
    */
-  async _handleActivePaneItemChanged(paneItem: ?mixed): Promise<void> {
+  async _handleActivePaneItemChanged(textEditor: ?mixed): Promise<void> {
     // The `paneItem` is not guaranteed to be an instance of `TextEditor` from
     // Atom's API, but usually is.  We return if the type is not `TextEditor`
     // since `NuxTour.isReady` expects a `TextEditor` as its argument.
-    if (!isValidTextEditor(paneItem)) {
+    if (!isValidTextEditor(textEditor)) {
       return;
     }
-    // Flow doesn't understand the refinement done above.
-    const textEditor: atom$TextEditor = (paneItem: any);
 
     for (const [id: string, nux: NuxTour] of this._pendingNuxes.entries()) {
       if (nux.getTriggerType() !== 'editor' || !nux.isReady(textEditor)) {

@@ -16,8 +16,9 @@ import type {
   MobilePlatform,
   PlatformGroup,
   TaskSettings,
+  UnsanitizedTaskSettings,
 } from './types';
-import type {Option} from '../../nuclide-ui/Dropdown';
+import type {Option} from 'nuclide-commons-ui/Dropdown';
 
 import * as React from 'react';
 import shallowequal from 'shallowequal';
@@ -26,7 +27,7 @@ import {formatDeploymentTarget} from './DeploymentTarget';
 import BuckToolbarSettings from './ui/BuckToolbarSettings';
 import BuckToolbarTargetSelector from './ui/BuckToolbarTargetSelector';
 import {Button, ButtonSizes} from 'nuclide-commons-ui/Button';
-import {Dropdown} from '../../nuclide-ui/Dropdown';
+import {Dropdown} from 'nuclide-commons-ui/Dropdown';
 import {LoadingSpinner} from 'nuclide-commons-ui/LoadingSpinner';
 import addTooltip from 'nuclide-commons-ui/addTooltip';
 import invariant from 'assert';
@@ -35,7 +36,10 @@ type Props = {
   appState: AppState,
   setBuildTarget(buildTarget: string): void,
   setDeploymentTarget(deploymentTarget: DeploymentTarget): void,
-  setTaskSettings(settings: TaskSettings): void,
+  setTaskSettings(
+    settings: TaskSettings,
+    unsanitizedSettings: UnsanitizedTaskSettings,
+  ): void,
 };
 
 type State = {
@@ -72,6 +76,7 @@ export default class BuckToolbar extends React.Component<Props, State> {
       platformProviderUi,
       selectedDeploymentTarget,
       taskSettings,
+      unsanitizedTaskSettings,
     } = this.props.appState;
     invariant(buckRoot != null);
     const extraToolbarUi =
@@ -85,7 +90,9 @@ export default class BuckToolbar extends React.Component<Props, State> {
         ? 'Loading target build rule...'
         : 'Loading available platforms...';
       status = (
-        <div ref={addTooltip({title, delay: 0})}>
+        <div
+          // eslint-disable-next-line nuclide-internal/jsx-simple-callback-refs
+          ref={addTooltip({title, delay: 0})}>
           <LoadingSpinner
             className="inline-block buck-spinner"
             size="EXTRA_SMALL"
@@ -96,6 +103,7 @@ export default class BuckToolbar extends React.Component<Props, State> {
       status = (
         <span
           className="icon icon-alert"
+          // eslint-disable-next-line nuclide-internal/jsx-simple-callback-refs
           ref={addTooltip({
             title:
               `'${buildTarget}' could not be found in ${buckRoot}.<br />` +
@@ -138,7 +146,7 @@ export default class BuckToolbar extends React.Component<Props, State> {
     }
 
     return (
-      <div className="nuclide-buck-toolbar">
+      <div className="nuclide-buck-toolbar inline-block">
         <BuckToolbarTargetSelector
           appState={this.props.appState}
           setBuildTarget={this.props.setBuildTarget}
@@ -154,9 +162,12 @@ export default class BuckToolbar extends React.Component<Props, State> {
             buckRoot={buckRoot}
             buckversionFileContents={buckversionFileContents}
             settings={taskSettings}
+            unsanitizedSettings={unsanitizedTaskSettings}
             platformProviderSettings={extraSettings}
             onDismiss={() => this._hideSettings()}
-            onSave={settings => this._saveSettings(settings)}
+            onSave={(settings, unsanitizedSettings) =>
+              this._saveSettings(settings, unsanitizedSettings)
+            }
           />
         ) : null}
       </div>
@@ -175,8 +186,11 @@ export default class BuckToolbar extends React.Component<Props, State> {
     this.setState({settingsVisible: false});
   }
 
-  _saveSettings(settings: TaskSettings) {
-    this.props.setTaskSettings(settings);
+  _saveSettings(
+    settings: TaskSettings,
+    unsanitizedSettings: UnsanitizedTaskSettings,
+  ) {
+    this.props.setTaskSettings(settings, unsanitizedSettings);
     this._hideSettings();
   }
 

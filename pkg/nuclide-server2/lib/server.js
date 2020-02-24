@@ -5,17 +5,15 @@
  * This source code is licensed under the license found in the LICENSE file in
  * the root directory of this source tree.
  *
- * @flow
+ * @flow strict-local
  * @format
  */
 
 import type {Transport} from 'big-dig/src/server/BigDigServer';
-import type {
-  LauncherParameters,
-  LauncherType,
-} from 'big-dig/src/server/NuclideServer';
+import type {BigDigServer, LauncherType} from 'big-dig/src/server/BigDigServer';
 import type {Transport as RpcTransportType} from '../../nuclide-rpc';
 
+// @fb-only: import vscodeLaunch from 'fb-big-dig-vscode-server/server';
 import {initializeLogging} from '../../nuclide-logging';
 import {getServerSideMarshalers} from '../../nuclide-marshalers-common';
 import {RpcConnection, ServiceRegistry} from '../../nuclide-rpc';
@@ -24,18 +22,14 @@ import {NUCLIDE_RPC_TAG} from './constants';
 
 initializeLogging();
 
-function launch(launcherParams: LauncherParameters): Promise<void> {
+function launch(server: BigDigServer): Promise<void> {
   const rpcServiceRegistry = new ServiceRegistry(
     getServerSideMarshalers,
     servicesConfig,
   );
 
-  const {server} = launcherParams;
   server.addSubscriber(NUCLIDE_RPC_TAG, {
     onConnection(transport: Transport) {
-      // TODO: we need some way of identifying a connection
-      // so that a client can resume its prior RpcConnection.
-      // Right now the client doesn't even reconnect though :D
       const rpcTransport: RpcTransportType = {
         send(message) {
           transport.send(message);
@@ -43,10 +37,7 @@ function launch(launcherParams: LauncherParameters): Promise<void> {
         onMessage() {
           return transport.onMessage();
         },
-        // Assuming we have a reliable connection, it'd be OK to just
-        // pretend the transport is always open.
-        // (Note that right now big-dig's WebSocketTransport *does* close
-        // and it *will* throw errors when we try to send messages.)
+        // TODO: Right now, connections are never closed.
         close() {},
         isClosed() {
           return false;
@@ -56,8 +47,10 @@ function launch(launcherParams: LauncherParameters): Promise<void> {
     },
   });
 
-  return Promise.resolve();
+  // Enable VSCode to connect to Nuclide servers by default.
+  // @fb-only: return vscodeLaunch(server);
+  return Promise.resolve(); // @oss-only
 }
 
-// eslint-disable-next-line rulesdir/no-commonjs
+// eslint-disable-next-line nuclide-internal/no-commonjs
 module.exports = (launch: LauncherType);

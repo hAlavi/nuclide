@@ -113,11 +113,6 @@ export class FileCache {
     return Promise.resolve(undefined);
   }
 
-  async getTotalBufferSize(): Promise<number> {
-    const addLength = (acc, {buffer}) => acc + buffer.getText().length;
-    return [...this._buffers.values()].reduce(addLength, 0);
-  }
-
   async onDirectoriesChanged(openDirectories: Set<NuclideUri>): Promise<void> {
     this._directoryEvents.next(openDirectories);
   }
@@ -215,7 +210,7 @@ export class FileCache {
     fileVersion: FileVersion,
   ): Promise<?simpleTextBuffer$TextBuffer> {
     // TODO: change this to return a string, like getBuffer() above.
-    if (!await this._requests.waitForBufferAtVersion(fileVersion)) {
+    if (!(await this._requests.waitForBufferAtVersion(fileVersion))) {
       return null;
     }
     const buffer = this.getBuffer(fileVersion.filePath);

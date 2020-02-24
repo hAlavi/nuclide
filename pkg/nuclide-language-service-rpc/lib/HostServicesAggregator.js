@@ -142,6 +142,13 @@ class HostServicesAggregator {
     return this._selfRelay().showActionRequired(title, options);
   }
 
+  dispatchCommand(
+    command: string,
+    params: {|args: any, projectRoot: NuclideUri|},
+  ): Promise<boolean> {
+    return this._selfRelay().dispatchCommand(command, params);
+  }
+
   isDisposed(): boolean {
     return this._isDisposed;
   }
@@ -293,8 +300,9 @@ class HostServicesRelay {
 
     // Otherwise, we are going to make a request to our parent.
     const parentPromise = this._aggregator._parent.showProgress(title, options);
-    const cancel = this._childIsDisposed.toPromise();
-    let progress: ?Progress = await Promise.race([parentPromise, cancel]);
+    let progress: ?Progress = await Observable.from(parentPromise)
+      .takeUntil(this._childIsDisposed)
+      .toPromise();
 
     // Should a cancellation come while we're waiting for our parent,
     // then we'll immediately return a no-op wrapper and ensure that
@@ -344,6 +352,16 @@ class HostServicesRelay {
       .refCount()
       .takeUntil(this._childIsDisposed)
       .publish();
+  }
+
+  async dispatchCommand(
+    command: string,
+    params: {|args: any, projectRoot: NuclideUri|},
+  ): Promise<boolean> {
+    if (this._aggregator.isDisposed()) {
+      return false;
+    }
+    return this._aggregator._parent.dispatchCommand(command, params);
   }
 
   dispose(): void {

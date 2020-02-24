@@ -10,41 +10,38 @@
  */
 
 import type {LegacyProcessMessage} from 'nuclide-commons/process';
-import type {NuclideDebuggerProvider} from 'nuclide-debugger-common';
-import type {DebuggerLaunchAttachProvider} from 'nuclide-debugger-common';
 import type {NuclideUri} from 'nuclide-commons/nuclideUri';
+import type {VsAdapterType} from 'nuclide-debugger-common';
 import type {PlatformService} from '../../nuclide-buck/lib/PlatformService';
 import type {PlatformGroup} from '../../nuclide-buck/lib/types';
-import {getDebuggerService} from '../../commons-atom/debugger';
+import {getDebuggerService} from 'nuclide-commons-atom/debugger';
 import typeof * as BuckService from '../../nuclide-buck-rpc';
 import type {BuckBuildSystem} from '../../nuclide-buck/lib/BuckBuildSystem';
-import type {
-  Device,
-  TaskSettings,
-  TaskType,
-} from '../../nuclide-buck/lib/types';
+import type {TaskSettings, TaskType} from '../../nuclide-buck/lib/types';
 import type {TaskEvent} from 'nuclide-commons/process';
 import type {ResolvedBuildTarget} from '../../nuclide-buck-rpc/lib/types';
 import type {BuckEvent} from '../../nuclide-buck/lib/BuckEventStream';
 
 import createPackage from 'nuclide-commons-atom/createPackage';
 import {Observable} from 'rxjs';
-import logger from './utils';
-import {getConfig} from './utils';
-import {LLDBLaunchAttachProvider} from './LLDBLaunchAttachProvider';
+// eslint-disable-next-line nuclide-internal/no-cross-atom-imports
+import {
+  isDebugTask,
+  getBuckSubcommandForTaskType,
+} from '../../nuclide-buck/lib/BuckTaskRunner';
 import UniversalDisposable from 'nuclide-commons/UniversalDisposable';
 import invariant from 'assert';
-// eslint-disable-next-line rulesdir/no-cross-atom-imports
-import {AttachProcessInfo} from '../../nuclide-debugger-native/lib/AttachProcessInfo';
-// eslint-disable-next-line rulesdir/no-cross-atom-imports
-import {LaunchProcessInfo} from '../../nuclide-debugger-native/lib/LaunchProcessInfo';
-import nuclideUri from 'nuclide-commons/nuclideUri';
+// eslint-disable-next-line nuclide-internal/no-cross-atom-imports
 import {
-  getServiceByNuclideUri,
-  getFileSystemServiceByNuclideUri,
-} from '../../nuclide-remote-connection';
+  getNativeVSPLaunchProcessConfig,
+  getNativeVSPAttachProcessConfig,
+} from '../../nuclide-debugger-vsp/lib/utils';
+import {VsAdapterTypes, VsAdapterNames} from 'nuclide-debugger-common';
+import nuclideUri from 'nuclide-commons/nuclideUri';
+import {getFileSystemServiceByNuclideUri} from '../../nuclide-remote-connection';
 import {getBuckServiceByNuclideUri} from '../../nuclide-remote-connection';
 import {getLogger} from 'log4js';
+import passesGK from 'nuclide-commons/passesGK';
 
 const SUPPORTED_RULE_TYPES = new Set(['cxx_binary', 'cxx_test']);
 const LLDB_PROCESS_ID_REGEX = /lldb -p ([0-9]+)/;
@@ -61,7 +58,6 @@ class Activation {
 
   constructor() {
     this._disposables = new UniversalDisposable();
-    logger.setLevel(getConfig().clientLogLevel);
     (this: any).createNativeDebuggerService = this.createNativeDebuggerService.bind(
       this,
     );
@@ -72,17 +68,6 @@ class Activation {
 
   dispose() {
     this._disposables.dispose();
-  }
-
-  createDebuggerProvider(): NuclideDebuggerProvider {
-    return {
-      name: 'lldb',
-      getLaunchAttachProvider(
-        connection: NuclideUri,
-      ): ?DebuggerLaunchAttachProvider {
-        return new LLDBLaunchAttachProvider('Native', connection);
-      },
-    };
   }
 
   createNativeDebuggerService(): NativeDebuggerService {
@@ -114,7 +99,14 @@ class Activation {
       return Observable.of(null);
     }
 
-    const availableActions = new Set(['build', 'run', 'test', 'debug']);
+    const availableActions = new Set([
+      'build',
+      'run',
+      'test',
+      'build-launch-debug',
+      'launch-debug',
+      'attach-debug',
+    ]);
     return Observable.of({
       name: 'Native',
       platforms: [
@@ -124,22 +116,22 @@ class Activation {
           tasksForBuildRuleType: buildRuleType => {
             return availableActions;
           },
-          runTask: (builder, taskType, target, settings, device) => {
-            const subcommand = taskType === 'debug' ? 'build' : taskType;
-            if (taskType === 'debug') {
+          runTask: (builder, taskType, target, settings) => {
+            const subcommand =
+              taskType === 'build-launch-debug' ? 'build' : taskType;
+            if (isDebugTask(taskType)) {
               return this._runDebugTask(
                 builder,
                 taskType,
                 target,
                 settings,
-                device,
                 buckRoot,
                 underlyingRuleType,
               );
             } else {
               return builder.runSubcommand(
                 buckRoot,
-                subcommand,
+                getBuckSubcommandForTaskType(subcommand),
                 target,
                 settings,
                 false,
@@ -195,12 +187,84 @@ class Activation {
     taskType: TaskType,
     buildTarget: ResolvedBuildTarget,
     taskSettings: TaskSettings,
-    device: ?Device,
     buckRoot: NuclideUri,
     ruleType: string,
   ): Observable<TaskEvent> {
-    invariant(taskType === 'debug');
+    if (taskType === 'attach-debug') {
+      // TODO: The implementation below is annoying/wrong
+      // It redirects to the attach dialog, ignores the buildTarget input and asks user to choose what they want to attach to.
+      // Instead it should automatically figure out the process based on buildTarget and attach to it.
+      return Observable.defer(async () => {
+        const providerType = await this._getBuckNativeDebugAdapterType();
+        atom.commands.dispatch(
+          atom.views.getView(atom.workspace),
+          'debugger:show-attach-dialog',
+          {
+            selectedTabName:
+              providerType === VsAdapterTypes.NATIVE_GDB
+                ? VsAdapterNames.NATIVE_GDB
+                : VsAdapterNames.NATIVE_LLDB,
+            config: {sourcePath: nuclideUri.getPath(buckRoot)},
+          },
+        );
+      }).ignoreElements();
+    }
 
+    const buckService = getBuckServiceByNuclideUri(buckRoot);
+    invariant(buckService != null);
+
+    const {qualifiedName, flavors} = buildTarget;
+    const separator = flavors.length > 0 ? '#' : '';
+    const targetString = `${qualifiedName}${separator}${flavors.join(',')}`;
+    const runArguments = taskSettings.runArguments || [];
+
+    const argString =
+      runArguments.length === 0
+        ? ''
+        : ` with arguments "${runArguments.join(' ')}"`;
+
+    const debugBuckTarget = Observable.defer(() =>
+      this._debugBuckTarget(
+        buckService,
+        buckRoot,
+        targetString,
+        taskSettings.buildArguments || [],
+        runArguments,
+      ),
+    )
+      .ignoreElements()
+      .catch(err => {
+        getLogger('nuclide-buck').error(
+          `Failed to launch debugger for ${targetString}`,
+          err,
+        );
+        return Observable.of({
+          type: 'message',
+          message: {
+            level: 'error',
+            text: `Failed to launch debugger: ${err.message}`,
+          },
+        });
+      })
+      .startWith(
+        {
+          type: 'message',
+          message: {
+            level: 'log',
+            text: `Launching debugger for ${targetString}${argString}...`,
+          },
+        },
+        {
+          type: 'progress',
+          progress: null,
+        },
+      );
+
+    if (taskType === 'launch-debug') {
+      return debugBuckTarget;
+    }
+
+    invariant(taskType === 'build-launch-debug');
     return this._addModeDbgIfNoModeInBuildArguments(
       buckRoot,
       taskSettings,
@@ -208,68 +272,17 @@ class Activation {
       switch (ruleType) {
         case 'cxx_binary':
         case 'cxx_test':
-          return builder.runSubcommand(
-            buckRoot,
-            'build',
-            buildTarget,
-            settings,
-            false,
-            null,
-            (processStream: Observable<LegacyProcessMessage>) => {
-              const buckService = getBuckServiceByNuclideUri(buckRoot);
-              invariant(buckService != null);
-
-              const {qualifiedName, flavors} = buildTarget;
-              const separator = flavors.length > 0 ? '#' : '';
-              const targetString = `${qualifiedName}${separator}${flavors.join(
-                ',',
-              )}`;
-              const runArguments = settings.runArguments || [];
-              const argString =
-                runArguments.length === 0
-                  ? ''
-                  : ` with arguments "${runArguments.join(' ')}"`;
-              return Observable.concat(
-                processStream.ignoreElements(),
-                Observable.defer(() =>
-                  this._debugBuckTarget(
-                    buckService,
-                    buckRoot,
-                    targetString,
-                    runArguments,
-                  ),
-                )
-                  .ignoreElements()
-                  .map(path => ({
-                    type: 'log',
-                    message: `Launched debugger with ${path}`,
-                    level: 'info',
-                  }))
-                  .catch(err => {
-                    getLogger('nuclide-buck').error(
-                      `Failed to launch debugger for ${targetString}`,
-                      err,
-                    );
-                    return Observable.of({
-                      type: 'log',
-                      message: `Failed to launch debugger: ${err.message}`,
-                      level: 'error',
-                    });
-                  })
-                  .startWith(
-                    {
-                      type: 'log',
-                      message: `Launching debugger for ${targetString}${argString}...`,
-                      level: 'log',
-                    },
-                    {
-                      type: 'progress',
-                      progress: null,
-                    },
-                  ),
-              );
-            },
-          );
+          return builder
+            .runSubcommand(
+              buckRoot,
+              'build',
+              buildTarget,
+              settings,
+              false,
+              null,
+            )
+            .ignoreElements()
+            .concat(debugBuckTarget);
         default:
           invariant(false);
       }
@@ -277,37 +290,31 @@ class Activation {
   }
 
   async _debugPidWithLLDB(pid: number, buckRoot: string): Promise<void> {
-    const attachInfo = await this._getAttachProcessInfoFromPid(pid, buckRoot);
-    invariant(attachInfo);
-    const debuggerService = await getDebuggerService();
-    debuggerService.startDebugging(attachInfo);
-  }
-
-  async _getAttachProcessInfoFromPid(
-    pid: number,
-    buckProjectPath: string,
-  ): Promise<?AttachProcessInfo> {
-    const rpcService = getServiceByNuclideUri(
-      'NativeDebuggerService',
-      buckProjectPath,
+    const config = getNativeVSPAttachProcessConfig(
+      VsAdapterTypes.NATIVE_LLDB,
+      buckRoot,
+      {
+        pid,
+        sourcePath: nuclideUri.getPath(buckRoot),
+        debuggerRoot: nuclideUri.getPath(buckRoot),
+      },
     );
-    invariant(rpcService);
-    const attachTargetList = await rpcService.getAttachTargetInfoList(pid);
-    if (attachTargetList.length === 0) {
-      return null;
-    }
-    const attachTargetInfo = attachTargetList[0];
-    attachTargetInfo.basepath = nuclideUri.getPath(buckProjectPath);
-    return new AttachProcessInfo(buckProjectPath, attachTargetInfo);
+    const debuggerService = await getDebuggerService();
+    debuggerService.startVspDebugging(config);
   }
 
   async _debugBuckTarget(
     buckService: BuckService,
     buckRoot: string,
     buildTarget: string,
+    buildArguments: Array<string>,
     runArguments: Array<string>,
   ): Promise<string> {
-    const output = await buckService.showOutput(buckRoot, buildTarget);
+    const output = await buckService.showOutput(
+      buckRoot,
+      buildTarget,
+      buildArguments,
+    );
     if (output.length === 0) {
       throw new Error(
         `Could not find build output path for target ${buildTarget}`,
@@ -327,7 +334,7 @@ class Activation {
       );
     }
 
-    // LaunchProcessInfo's arguments should be local to the remote directory.
+    // launch config's arguments should be local to the remote directory.
     const remoteBuckRoot = nuclideUri.getPath(buckRoot);
     const remoteOutputPath = nuclideUri.getPath(
       nuclideUri.join(buckRoot, relativeOutputPath),
@@ -341,19 +348,28 @@ class Activation {
       }
     }
 
-    const info = new LaunchProcessInfo(buckRoot, {
-      executablePath: remoteOutputPath,
-      // Allow overriding of a test's default arguments if provided.
-      arguments: (runArguments.length ? runArguments : targetOutput.args) || [],
-      environmentVariables: env,
-      workingDirectory: remoteBuckRoot,
-      basepath: remoteBuckRoot,
-      lldbPythonPath: null,
-    });
-
+    const config = await getNativeVSPLaunchProcessConfig(
+      await this._getBuckNativeDebugAdapterType(),
+      nuclideUri.join(buckRoot, relativeOutputPath),
+      {
+        args: (runArguments.length ? runArguments : targetOutput.args) || [],
+        cwd: remoteBuckRoot,
+        env,
+        sourcePath: remoteBuckRoot,
+        debuggerRoot: remoteBuckRoot,
+      },
+    );
     const debuggerService = await getDebuggerService();
-    await debuggerService.startDebugging(info);
+    await debuggerService.startVspDebugging(config);
     return remoteOutputPath;
+  }
+
+  async _getBuckNativeDebugAdapterType(): Promise<VsAdapterType> {
+    if (await passesGK('nuclide_buck_uses_gdb')) {
+      return VsAdapterTypes.NATIVE_GDB;
+    } else {
+      return VsAdapterTypes.NATIVE_LLDB;
+    }
   }
 
   _addModeDbgIfNoModeInBuildArguments(

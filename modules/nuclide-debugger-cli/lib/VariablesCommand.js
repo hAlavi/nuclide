@@ -6,17 +6,19 @@
  * LICENSE file in the root directory of this source tree. An additional grant
  * of patent rights can be found in the PATENTS file in the same directory.
  *
- * @flow
+ * @flow strict-local
  * @format
  */
 
 import type {Command} from './Command';
 import type {ConsoleIO} from './ConsoleIO';
 import {DebuggerInterface} from './DebuggerInterface';
+import TokenizedLine from './TokenizedLine';
 
 export default class VariablesCommand implements Command {
   name = 'variables';
-  helpText = '[scope] Display variables of the current stack frame, optionally for a single scope.';
+  helpText =
+    '[scope] Display variables of the current stack frame, optionally for a single scope.';
   detailedHelpText = `
 variables [scope]
 
@@ -43,33 +45,31 @@ when the program stops the most recent frame will be selected.
     this._debugger = debug;
   }
 
-  async execute(args: string[]): Promise<void> {
+  async execute(line: TokenizedLine): Promise<void> {
+    const args = line.stringTokens().slice(1);
     if (args.length > 1) {
       throw new Error("'variables' takes at most one scope parameter");
     }
 
-    const variables = await this._debugger.getVariables(args[0]);
+    let text = '';
+    const variables = await this._debugger.getVariablesByScope(args[0]);
     for (const scope of variables) {
       const vars = scope.variables;
       if (scope.expensive && vars == null) {
-        this._console.outputLine();
-        this._console.outputLine(
-          `Variables in scope '${
-            scope.scopeName
-          }' have been elided as they are expensive`,
-        );
-
-        this._console.outputLine(
-          `to evaluate. Use 'variables ${scope.scopeName}' to see them.`,
-        );
-        return;
+        text += `\nVariables in scope '${
+          scope.scopeName
+        }' have been elided as they are expensive\nto evaluate. Use 'variables ${
+          scope.scopeName
+        }' to see them.\n`;
+        continue;
       }
 
       if (vars != null) {
-        this._console.outputLine();
-        this._console.outputLine(`Variables in scope '${scope.scopeName}':`);
-        vars.forEach(v => this._console.outputLine(`${v.name} => ${v.value}`));
+        text += `\nVariables in scope '${scope.scopeName}':\n`;
+        text += vars.map(v => `${v.name} => ${v.value}`).join('\n');
       }
+      text += '\n';
     }
+    this._console.outputLine(text);
   }
 }

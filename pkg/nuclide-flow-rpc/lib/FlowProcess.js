@@ -20,7 +20,7 @@ import {BehaviorSubject, Observable} from 'rxjs';
 import {getLogger} from 'log4js';
 const logger = getLogger('nuclide-flow-rpc');
 
-import {track} from '../../nuclide-analytics';
+import {track} from 'nuclide-analytics';
 
 import {runCommandDetailed, spawn} from 'nuclide-commons/process';
 import {sleep} from 'nuclide-commons/promise';
@@ -109,16 +109,19 @@ export class FlowProcess {
     this._optionalIDEConnections = new BehaviorSubject(null);
     this._ideConnections = this._createIDEConnectionStream();
 
+    // eslint-disable-next-line nuclide-internal/unused-subscription
     this._serverStatus.subscribe(status => {
       logger.info(`[${status}]: Flow server in ${this._root}`);
     });
 
+    // eslint-disable-next-line nuclide-internal/unused-subscription
     this._serverStatus
       .filter(x => x === ServerStatus.NOT_RUNNING)
       .subscribe(() => {
         this._startFlowServer();
       });
 
+    // eslint-disable-next-line nuclide-internal/unused-subscription
     this._serverStatus
       .scan(
         ({previousState}, nextState) => {
@@ -138,6 +141,7 @@ export class FlowProcess {
         this._pingServer();
       });
 
+    // eslint-disable-next-line nuclide-internal/unused-subscription
     this._serverStatus
       .filter(status => status === ServerStatus.FAILED)
       .subscribe(() => {
@@ -151,6 +155,7 @@ export class FlowProcess {
       }
       return execInfo.flowVersion;
     });
+    // eslint-disable-next-line nuclide-internal/unused-subscription
     this._serverStatus
       .filter(state => state === 'not running')
       .subscribe(() => this._version.invalidateVersion());
@@ -388,13 +393,7 @@ export class FlowProcess {
       this._setServerStatus(ServerStatus.NOT_INSTALLED);
       return;
     }
-    const lazy = [];
-    if (getConfig('lazyServer')) {
-      lazy.push('--lazy');
-    }
-    if (getConfig('ideLazyMode')) {
-      lazy.push('--lazy-mode', 'ide');
-    }
+    const lazy = getConfig('lazyMode') === true ? ['--lazy-mode', 'ide'] : [];
     // `flow server` will start a server in the foreground. runCommand/runCommandDetailed
     // will not resolve the promise until the process exits, which in this
     // case is never. We need to use spawn directly to get access to the
@@ -522,6 +521,7 @@ export class FlowProcess {
   /** Ping the server until it reaches a steady state */
   async _pingServer(): Promise<void> {
     let hasReachedSteadyState = false;
+    // eslint-disable-next-line nuclide-internal/unused-subscription
     this._serverStatus
       .filter(state => !TEMP_SERVER_STATES.includes(state))
       .take(1)
@@ -561,13 +561,14 @@ export class FlowProcess {
         .race(Observable.of(false).delay(SERVER_READY_TIMEOUT_MS))
         // If the stream is completed timeout will not return its default value and we will see an
         // EmptyError. So, provide a defaultValue here so the promise resolves.
-        .first(null, null, false)
+        .first(null, false)
         .toPromise()
     );
   }
 
   _getMaxWorkers(): number {
-    return Math.max(os.cpus().length - 2, 1);
+    const cpus = os.cpus();
+    return cpus ? Math.max(cpus.length - 2, 1) : 1;
   }
 
   /**

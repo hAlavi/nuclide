@@ -11,6 +11,7 @@
 
 // $FlowFB
 import type {ProjectSymbolSearchProvider} from '../../fb-go-to-project-symbol-dash-provider/lib/types';
+import type {OnDidInsertSuggestionArgument} from '../../nuclide-language-service/lib/AutocompleteProvider';
 import type {CodeActionConfig} from '../../nuclide-language-service/lib/CodeActionProvider';
 import type {
   GlobalProviderType,
@@ -21,11 +22,12 @@ import type {AtomLanguageServiceConfig} from '../../nuclide-language-service/lib
 import type {LanguageService} from '../../nuclide-language-service/lib/LanguageService';
 
 import createPackage from 'nuclide-commons-atom/createPackage';
+import nuclideUri from 'nuclide-commons/nuclideUri';
 import UniversalDisposable from 'nuclide-commons/UniversalDisposable';
-import typeof * as JsService from '../../nuclide-js-imports-client-rpc/lib/JsImportsService';
 
 import {applyTextEditsToBuffer} from 'nuclide-commons-atom/text-edit';
-import {TAB_SIZE_SIGNIFYING_FIX_ALL_IMPORTS_FORMATTING} from '../../nuclide-js-imports-server/src/utils/constantsForClient';
+import {track} from 'nuclide-analytics';
+import * as convert from '../../nuclide-vscode-language-service-rpc/lib/convert';
 import {
   AtomLanguageService,
   getHostServices,
@@ -35,34 +37,35 @@ import {
   getNotifierByConnection,
   getFileVersionOfEditor,
 } from '../../nuclide-open-files';
-import {getServiceByConnection} from '../../nuclide-remote-connection';
+import {getVSCodeLanguageServiceByConnection} from '../../nuclide-remote-connection';
 import featureConfig from 'nuclide-commons-atom/feature-config';
 import QuickOpenProvider from './QuickOpenProvider';
 import JSSymbolSearchProvider from './JSSymbolSearchProvider';
 import DashProjectSymbolProvider from './DashProjectSymbolProvider';
 
-const JS_IMPORTS_SERVICE_NAME = 'JSAutoImportsService';
-
 async function connectToJSImportsService(
   connection: ?ServerConnection,
 ): Promise<LanguageService> {
-  const jsService: JsService = getServiceByConnection(
-    JS_IMPORTS_SERVICE_NAME,
-    connection,
-  );
-
   const [fileNotifier, host] = await Promise.all([
     getNotifierByConnection(connection),
     getHostServices(),
   ]);
 
-  const lspService = await jsService.initializeLsp(
-    ['.flowconfig'],
-    ['.js'],
-    (featureConfig.get('nuclide-js-imports-client.logLevel'): any),
-    fileNotifier,
-    host,
-    getAutoImportSettings(),
+  const service = getVSCodeLanguageServiceByConnection(connection);
+  const lspService = await service.createMultiLspLanguageService(
+    'jsimports',
+    './pkg/nuclide-js-imports-server/src/index-entry.js',
+    [],
+    {
+      fileNotifier,
+      host,
+      logCategory: 'jsimports',
+      logLevel: (featureConfig.get('nuclide-js-imports-client.logLevel'): any),
+      projectFileNames: ['.flowconfig'],
+      fileExtensions: ['.js', '.jsx'],
+      initializationOptions: getAutoImportSettings(),
+      fork: true,
+    },
   );
   return lspService || new NullLanguageService();
 }
@@ -79,10 +82,11 @@ function createLanguageService(): AtomLanguageService<LanguageService> {
     excludeLowerPriority: false,
     analytics: {
       eventName: 'nuclide-js-imports',
-      shouldLogInsertedSuggestion: false,
+      shouldLogInsertedSuggestion: true,
     },
     disableForSelector: null,
     autocompleteCacherConfig: null,
+    supportsResolve: false,
   };
 
   const codeActionConfig: CodeActionConfig = {
@@ -94,12 +98,48 @@ function createLanguageService(): AtomLanguageService<LanguageService> {
 
   const atomConfig: AtomLanguageServiceConfig = {
     name: 'JSAutoImports',
-    grammars: ['source.js.jsx', 'source.js'],
+    grammars: ['source.js.jsx', 'source.js', 'source.flow'],
     diagnostics: diagnosticsConfig,
     autocomplete: autocompleteConfig,
     codeAction: codeActionConfig,
+    typeHint: {
+      version: '0.0.0',
+      priority: 0.1,
+      analyticsEventName: 'jsimports.typeHint',
+    },
   };
-  return new AtomLanguageService(connectToJSImportsService, atomConfig);
+  return new AtomLanguageService(
+    connectToJSImportsService,
+    atomConfig,
+    onDidInsertSuggestion,
+  );
+}
+
+function onDidInsertSuggestion({
+  suggestion,
+}: OnDidInsertSuggestionArgument): void {
+  const {
+    description,
+    displayText,
+    extraData,
+    remoteUri,
+    replacementPrefix,
+    snippet,
+    text,
+    type,
+  } = suggestion;
+  track('nuclide-js-imports:insert-suggestion', {
+    suggestion: {
+      description,
+      displayText,
+      extraData,
+      remoteUri,
+      replacementPrefix,
+      snippet,
+      text,
+      type,
+    },
+  });
 }
 
 function getAutoImportSettings() {
@@ -109,6 +149,9 @@ function getAutoImportSettings() {
   // their settings and send DidChangeConfiguration requests to the server.
   // TODO: Observe settings changes + send to the server.
   return {
+    componentModulePathFilter: featureConfig.get(
+      'nuclide-js-imports-client.componentModulePathFilter',
+    ),
     diagnosticsWhitelist: featureConfig.get(
       'nuclide-js-imports-client.diagnosticsWhitelist',
     ),
@@ -162,44 +205,45 @@ class Activation {
           if (editor == null) {
             return;
           }
+          const editorPath = editor.getPath();
           const fileVersion = await getFileVersionOfEditor(editor);
-          if (fileVersion == null) {
+          if (fileVersion == null || editorPath == null) {
             return;
           }
           const buffer = editor.getBuffer();
-          const range = buffer.getRange();
-          const languageService = await this._languageService.getLanguageServiceForUri(
-            editor.getPath(),
+          const languageService: ?LanguageService = await this._languageService.getLanguageServiceForUri(
+            editorPath,
           );
           if (languageService == null) {
             return;
           }
-          const triggerOptions = {
-            // secret code
-            tabSize: TAB_SIZE_SIGNIFYING_FIX_ALL_IMPORTS_FORMATTING,
-            // just for typechecking to pass
-            insertSpaces: true,
-          };
-          const result = await languageService.formatSource(
-            fileVersion,
-            range,
-            triggerOptions,
-          );
+
           const beforeEditsCheckpoint = buffer.createCheckpoint();
-          // First add all new imports naively
-          if (result != null) {
-            if (!applyTextEditsToBuffer(buffer, result)) {
-              // TODO(T24077432): Show the error to the user
-              throw new Error('Could not apply edits to text buffer.');
-            }
+          const {
+            edits,
+            addedRequires,
+            missingExports,
+          } = (await languageService.sendLspRequest(
+            editorPath,
+            'workspace/executeCommand',
+            {
+              command: 'getAllImports',
+              arguments: [nuclideUri.getPath(editorPath)],
+            },
+          ): any);
+          if (
+            !applyTextEditsToBuffer(
+              buffer,
+              convert.lspTextEdits_atomTextEdits(edits || []),
+            )
+          ) {
+            // TODO(T24077432): Show the error to the user
+            throw new Error('Could not apply edits to text buffer.');
           }
           // Then use nuclide-format-js to properly format the imports
-          const successfulEdits = (result || []).filter(
-            edit => edit.newText !== '',
-          );
           organizeRequires({
-            addedRequires: successfulEdits.length > 0,
-            missingExports: successfulEdits.length !== (result || []).length,
+            addedRequires,
+            missingExports,
           });
           buffer.groupChangesSinceCheckpoint(beforeEditsCheckpoint);
         },

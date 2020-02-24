@@ -16,24 +16,21 @@ import type {
   ConsoleService,
   SourceInfo,
   Message,
-  OutputProvider,
-  OutputProviderStatus,
-  OutputService,
+  ConsoleSourceStatus,
   Record,
+  RecordToken,
   RegisterExecutorFunction,
-  WatchEditorFunction,
   Store,
+  Level,
 } from './types';
 import type {CreatePasteFunction} from './types';
 
 import {List} from 'immutable';
 import createPackage from 'nuclide-commons-atom/createPackage';
 import {destroyItemWhere} from 'nuclide-commons-atom/destroyItemWhere';
+import {combineEpicsFromImports} from 'nuclide-commons/epicHelpers';
 import {Observable} from 'rxjs';
-import {
-  combineEpics,
-  createEpicMiddleware,
-} from 'nuclide-commons/redux-observable';
+import {createEpicMiddleware} from 'nuclide-commons/redux-observable';
 import {observableFromSubscribeFunction} from 'nuclide-commons/event';
 import featureConfig from 'nuclide-commons-atom/feature-config';
 import UniversalDisposable from 'nuclide-commons/UniversalDisposable';
@@ -43,7 +40,8 @@ import Reducers from './redux/Reducers';
 import {Console, WORKSPACE_VIEW_URI} from './ui/Console';
 import invariant from 'assert';
 import {applyMiddleware, createStore} from 'redux';
-import {makeToolbarButtonSpec} from 'nuclide-commons-ui/ToolbarUtils';
+import nullthrows from 'nullthrows';
+import uuid from 'uuid';
 
 const MAXIMUM_SERIALIZED_MESSAGES_CONFIG =
   'atom-ide-console.maximumSerializedMessages';
@@ -54,9 +52,11 @@ class Activation {
   _disposables: UniversalDisposable;
   _rawState: ?Object;
   _store: Store;
+  _nextMessageId: number;
 
   constructor(rawState: ?Object) {
     this._rawState = rawState;
+    this._nextMessageId = 0;
     this._disposables = new UniversalDisposable(
       atom.contextMenu.add({
         '.console-record': [
@@ -68,6 +68,7 @@ class Activation {
       }),
       atom.commands.add('.console-record', 'console:copy-message', event => {
         const el = event.target;
+        // $FlowFixMe(>=0.68.0) Flow suppress (T27187857)
         if (el == null || typeof el.innerText !== 'string') {
           return;
         }
@@ -88,8 +89,8 @@ class Activation {
         observableFromSubscribeFunction(cb =>
           atom.config.observe('editor.fontSize', cb),
         ),
-        featureConfig.observeAsStream('atom-ide-console.consoleFontScale'),
-        (fontSize, consoleFontScale) => fontSize * parseFloat(consoleFontScale),
+        featureConfig.observeAsStream('atom-ide-console.fontScale'),
+        (fontSize, fontScale) => fontSize * parseFloat(fontScale),
       )
         .map(Actions.setFontSize)
         .subscribe(this._store.dispatch),
@@ -100,10 +101,7 @@ class Activation {
   _getStore(): Store {
     if (this._store == null) {
       const initialState = deserializeAppState(this._rawState);
-      const epics = Object.keys(Epics)
-        .map(k => Epics[k])
-        .filter(epic => typeof epic === 'function');
-      const rootEpic = combineEpics(...epics);
+      const rootEpic = combineEpicsFromImports(Epics, 'atom-ide-ui');
       this._store = createStore(
         Reducers,
         initialState,
@@ -119,14 +117,12 @@ class Activation {
 
   consumeToolBar(getToolBar: toolbar$GetToolbar): void {
     const toolBar = getToolBar('nuclide-console');
-    toolBar.addButton(
-      makeToolbarButtonSpec({
-        icon: 'terminal',
-        callback: 'console:toggle',
-        tooltip: 'Toggle Console',
-        priority: 700,
-      }),
-    );
+    toolBar.addButton({
+      icon: 'nuclicon-console',
+      callback: 'console:toggle',
+      tooltip: 'Toggle Console',
+      priority: 700,
+    });
     this._disposables.add(() => {
       toolBar.removeItems();
     });
@@ -142,7 +138,7 @@ class Activation {
     });
   }
 
-  consumeWatchEditor(watchEditor: WatchEditorFunction): IDisposable {
+  consumeWatchEditor(watchEditor: atom$AutocompleteWatchEditor): IDisposable {
     this._getStore().dispatch(Actions.setWatchEditor(watchEditor));
     return new UniversalDisposable(() => {
       if (this._getStore().getState().watchEditor === watchEditor) {
@@ -191,6 +187,7 @@ class Activation {
       initialFilterText: state.filterText,
       initialEnableRegExpFilter: state.enableRegExpFilter,
       initialUnselectedSourceIds: state.unselectedSourceIds,
+      initialUnselectedSeverities: new Set(state.unselectedSeverities || []),
     });
   }
 
@@ -213,41 +210,116 @@ class Activation {
       activation = null;
     });
 
+    // Creates an objet with callbacks to request manipulations on the current
+    // console message entry.
+    const createToken = (messageId: string) => {
+      const findMessage = () => {
+        invariant(activation != null);
+        return nullthrows(
+          activation
+            ._getStore()
+            .getState()
+            .incompleteRecords.find(r => r.messageId === messageId),
+        );
+      };
+
+      return Object.freeze({
+        // Message needs to be looked up lazily at call time rather than
+        // cached in this object to avoid requiring the update action to
+        // operate synchronously. When we append text, we don't know the
+        // full new text without looking up the new message object in the
+        // new store state after the mutation.
+        getCurrentText: () => {
+          return findMessage().text;
+        },
+        getCurrentLevel: () => {
+          return findMessage().level;
+        },
+        setLevel: (newLevel: Level) => {
+          return updateMessage(messageId, null, newLevel, false);
+        },
+        appendText: (text: string) => {
+          return updateMessage(messageId, text, null, false);
+        },
+        setComplete: () => {
+          updateMessage(messageId, null, null, true);
+        },
+      });
+    };
+
+    const updateMessage = (
+      messageId: string,
+      appendText: ?string,
+      overrideLevel: ?Level,
+      setComplete: boolean,
+    ) => {
+      invariant(activation != null);
+      activation
+        ._getStore()
+        .dispatch(
+          Actions.recordUpdated(
+            messageId,
+            appendText,
+            overrideLevel,
+            setComplete,
+          ),
+        );
+      return createToken(messageId);
+    };
+
     return (sourceInfo: SourceInfo) => {
       invariant(activation != null);
       let disposed;
       activation._getStore().dispatch(Actions.registerSource(sourceInfo));
       const console = {
         // TODO: Update these to be (object: any, ...objects: Array<any>): void.
-        log(object: string): void {
-          console.append({text: object, level: 'log'});
+        log(object: string): ?RecordToken {
+          return console.append({text: object, level: 'log'});
         },
-        warn(object: string): void {
-          console.append({text: object, level: 'warning'});
+        warn(object: string): ?RecordToken {
+          return console.append({text: object, level: 'warning'});
         },
-        error(object: string): void {
-          console.append({text: object, level: 'error'});
+        error(object: string): ?RecordToken {
+          return console.append({text: object, level: 'error'});
         },
-        info(object: string): void {
-          console.append({text: object, level: 'info'});
+        info(object: string): ?RecordToken {
+          return console.append({text: object, level: 'info'});
         },
-        append(message: Message): void {
+        success(object: string): ?RecordToken {
+          return console.append({text: object, level: 'success'});
+        },
+        append(message: Message): ?RecordToken {
           invariant(activation != null && !disposed);
-          activation._getStore().dispatch(
-            Actions.recordReceived({
-              text: message.text,
-              level: message.level,
-              data: message.data,
-              tags: message.tags,
-              scopeName: message.scopeName,
-              sourceId: sourceInfo.id,
-              kind: message.kind || 'message',
-              timestamp: new Date(), // TODO: Allow this to come with the message?
-              repeatCount: 1,
-            }),
-          );
+          const incomplete = Boolean(message.incomplete);
+          const record: Record = {
+            // A unique message ID is not required for complete messages,
+            // since they cannot be updated they don't need to be found later.
+            text: message.text,
+            level: message.level,
+            format: message.format,
+            expressions: message.expressions,
+            tags: message.tags,
+            scopeName: message.scopeName,
+            sourceId: sourceInfo.id,
+            sourceName: sourceInfo.name,
+            kind: message.kind || 'message',
+            timestamp: new Date(), // TODO: Allow this to come with the message?
+            repeatCount: 1,
+            incomplete,
+          };
+
+          let token = null;
+          if (incomplete) {
+            // An ID is only required for incomplete messages, which need
+            // to be looked up for mutations.
+            record.messageId = uuid.v4();
+            token = createToken(record.messageId);
+          }
+
+          activation._getStore().dispatch(Actions.recordReceived(record));
+          return token;
         },
-        setStatus(status: OutputProviderStatus): void {
+        setStatus(status: ConsoleSourceStatus): void {
           invariant(activation != null && !disposed);
           activation
             ._getStore()
@@ -264,31 +336,6 @@ class Activation {
         },
       };
       return console;
-    };
-  }
-
-  provideOutputService(): OutputService {
-    // Create a local, nullable reference so that the service consumers don't keep the Activation
-    // instance in memory.
-    let activation = this;
-    this._disposables.add(() => {
-      activation = null;
-    });
-
-    return {
-      registerOutputProvider(outputProvider: OutputProvider): IDisposable {
-        invariant(activation != null, 'Output service used after deactivation');
-        activation
-          ._getStore()
-          .dispatch(Actions.registerOutputProvider(outputProvider));
-        return new UniversalDisposable(() => {
-          if (activation != null) {
-            activation
-              ._getStore()
-              .dispatch(Actions.unregisterOutputProvider(outputProvider));
-          }
-        });
-      },
     };
   }
 
@@ -328,7 +375,12 @@ class Activation {
       records: this._store
         .getState()
         .records.slice(-maximumSerializedMessages)
-        .toArray(),
+        .toArray()
+        .map(record => {
+          // `Executor` is not serializable. Make sure to remove it first.
+          const {executor, ...rest} = record;
+          return rest;
+        }),
       history: this._store.getState().history.slice(-maximumSerializedHistory),
     };
   }
@@ -342,6 +394,10 @@ function deserializeAppState(rawState: ?Object): AppState {
     records:
       rawState && rawState.records
         ? List(rawState.records.map(deserializeRecord))
+        : List(),
+    incompleteRecords:
+      rawState && rawState.incompleteRecords
+        ? List(rawState.incompleteRecords.map(deserializeRecord))
         : List(),
     history: rawState && rawState.history ? rawState.history : [],
     providers: new Map(),
@@ -357,6 +413,18 @@ function deserializeRecord(record: Object): Record {
   return {
     ...record,
     timestamp: parseDate(record.timestamp) || new Date(0),
+    // At one point in the time the messageId was a number, so the user might
+    // have a number serialized.
+    messageId:
+      record == null ||
+      record.messageId == null ||
+      // Sigh. We (I, -jeldredge) had a bug at one point where we accidentally
+      // converted serialized values of `undefined` to the string `"undefiend"`.
+      // Those could then have been serialized back to disk. So, for a little
+      // while at least, we should ensure we fix these bad values.
+      record.messageId === 'undefined'
+        ? undefined
+        : String(record.messageId),
   };
 }
 

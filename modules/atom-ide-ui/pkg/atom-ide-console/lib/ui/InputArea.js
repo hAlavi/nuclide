@@ -6,23 +6,25 @@
  * LICENSE file in the root directory of this source tree. An additional grant
  * of patent rights can be found in the PATENTS file in the same directory.
  *
- * @flow
+ * @flow strict-local
  * @format
  */
 
-import type {WatchEditorFunction} from '../types';
 import UniversalDisposable from 'nuclide-commons/UniversalDisposable';
 import * as React from 'react';
 import ReactDOM from 'react-dom';
 import {AtomTextEditor} from 'nuclide-commons-ui/AtomTextEditor';
 import {Observable} from 'rxjs';
 
-type Props = {
+type Props = {|
+  fontSize: number,
   onSubmit: (value: string) => mixed,
   scopeName: ?string,
   history: Array<string>,
-  watchEditor: ?WatchEditorFunction,
-};
+  watchEditor: ?atom$AutocompleteWatchEditor,
+  onDidTextBufferChange?: (event: atom$AggregatedTextEditEvent) => mixed,
+  placeholderText?: string,
+|};
 
 type State = {
   historyIndex: number,
@@ -44,6 +46,12 @@ export default class InputArea extends React.Component<Props, State> {
       draft: '',
     };
   }
+
+  focus = (): void => {
+    if (this._textEditorModel != null) {
+      this._textEditorModel.getElement().focus();
+    }
+  };
 
   _submit = (): void => {
     // Clear the text and trigger the `onSubmit` callback
@@ -94,16 +102,28 @@ export default class InputArea extends React.Component<Props, State> {
       return;
     }
     if (event.which === ENTER_KEY_CODE) {
-      event.preventDefault();
-      event.stopImmediatePropagation();
+      // If the current auto complete settings are such that pressing
+      // enter does NOT accept a suggestion, and the auto complete box
+      // is open, treat enter as submit. Otherwise, let the event
+      // propagate so that autocomplete can handle it.
+      const setting = atom.config.get('autocomplete-plus.confirmCompletion');
+      const enterAcceptsSuggestion =
+        setting == null || String(setting).includes('enter');
+      if (!isAutocompleteOpen || !enterAcceptsSuggestion) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
 
-      if (event.ctrlKey) {
-        editor.insertNewline();
-        return;
+        if (event.ctrlKey || event.altKey || event.shiftKey) {
+          editor.insertNewline();
+          return;
+        }
+
+        this._submit();
       }
-
-      this._submit();
-    } else if (event.which === UP_KEY_CODE) {
+    } else if (
+      event.which === UP_KEY_CODE &&
+      (editor.getLineCount() <= 1 || editor.getCursorBufferPosition().row === 0)
+    ) {
       if (this.props.history.length === 0 || isAutocompleteOpen) {
         return;
       }
@@ -121,12 +141,19 @@ export default class InputArea extends React.Component<Props, State> {
       editor.setText(
         this.props.history[this.props.history.length - historyIndex - 1],
       );
-    } else if (event.which === DOWN_KEY_CODE) {
+    } else if (
+      event.which === DOWN_KEY_CODE &&
+      (editor.getLineCount() <= 1 ||
+        editor.getCursorBufferPosition().row === editor.getLineCount() - 1)
+    ) {
       if (this.props.history.length === 0 || isAutocompleteOpen) {
         return;
       }
       event.preventDefault();
       event.stopImmediatePropagation();
+      // TODO: (wbinnssmith) T30771435 this setState depends on current state
+      // and should use an updater function rather than an object
+      // eslint-disable-next-line react/no-access-state-in-setstate
       const historyIndex = Math.max(this.state.historyIndex - 1, -1);
       this.setState({historyIndex});
       if (historyIndex === -1) {
@@ -145,7 +172,9 @@ export default class InputArea extends React.Component<Props, State> {
         ? null
         : atom.grammars.grammarForScopeName(this.props.scopeName);
     return (
-      <div className="console-input-wrapper">
+      <div
+        className="console-input-wrapper"
+        style={{fontSize: `${this.props.fontSize}px`}}>
         <AtomTextEditor
           ref={this._handleTextEditor}
           grammar={grammar}
@@ -154,6 +183,8 @@ export default class InputArea extends React.Component<Props, State> {
           lineNumberGutterVisible={false}
           onConfirm={this._submit}
           onInitialized={this._attachLabel}
+          onDidTextBufferChange={this.props.onDidTextBufferChange}
+          placeholderText={this.props.placeholderText}
         />
       </div>
     );

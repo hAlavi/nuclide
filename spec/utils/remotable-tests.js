@@ -104,11 +104,11 @@ class RemoteTestContext {
 
   async setProject(localProjectPath: string): Promise<void> {
     invariant(this._remoteProjectPath == null, 'Call setProject exactly once');
-    startNuclideServer();
+    await startNuclideServer();
     const connection = await addRemoteProject(localProjectPath);
     invariant(connection != null, 'connection was not established');
     this._connection = connection;
-    this._remoteProjectPath = connection.getUriForInitialWorkingDirectory();
+    this._remoteProjectPath = connection.getUri();
     invariant(this._remoteProjectPath != null, 'Remote project path not set');
   }
 
@@ -121,7 +121,6 @@ class RemoteTestContext {
 function getDescribeFunction(focus: boolean): Function {
   // Guard against `fdescribe` usages in prod.
   if (focus && process.env.SANDCASTLE === '1') {
-    // $FlowIgnore usage of `fdescribe`.
     fdescribe('Invalid usage of `focus` in production', () => {
       it('`fdescribe` not allowed in production', () => {
         throw new Error(
@@ -131,7 +130,6 @@ function getDescribeFunction(focus: boolean): Function {
     });
     return describe;
   }
-  // $FlowIgnore usage of `fdescribe`.
   return focus ? fdescribe : describe;
 }
 

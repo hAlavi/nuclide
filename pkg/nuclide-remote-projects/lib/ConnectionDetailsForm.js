@@ -5,12 +5,11 @@
  * This source code is licensed under the license found in the LICENSE file in
  * the root directory of this source tree.
  *
- * @flow
+ * @flow strict-local
  * @format
  */
 
 import type {DnsLookup} from '../../nuclide-remote-connection/lib/lookup-prefer-ip-v6';
-import type {SshHandshakeAuthMethodsType} from '../../nuclide-remote-connection/lib/SshHandshake';
 import type {NuclideRemoteConnectionParamsWithPassword} from './connection-types';
 
 import {getOfficialRemoteServerCommand} from './connection-profile-utils';
@@ -24,10 +23,17 @@ import lookupPreferIpv6 from '../../nuclide-remote-connection/lib/lookup-prefer-
 import RadioGroup from 'nuclide-commons-ui/RadioGroup';
 import * as React from 'react';
 import ReactDOM from 'react-dom';
-import {SshHandshake} from '../../nuclide-remote-connection';
+import {SupportedMethods} from 'big-dig/src/client/SshHandshake';
+import {Message} from 'nuclide-commons-ui/Message';
+import Link from 'nuclide-commons-ui/Link';
+import passesGK from 'nuclide-commons/passesGK';
 
-const {SupportedMethods} = SshHandshake;
-const authMethods: Array<SshHandshakeAuthMethodsType> = [
+export type SshHandshakeAuthMethodsType = $Values<typeof SupportedMethods>;
+
+// @fb-only: const PKEY_LINK = 'https://fburl.com/deprecationnotice';
+const PKEY_LINK = null; // @oss-only
+
+let authMethods: Array<SshHandshakeAuthMethodsType> = [
   SupportedMethods.PASSWORD,
   SupportedMethods.SSL_AGENT,
   SupportedMethods.PRIVATE_KEY,
@@ -61,6 +67,7 @@ type State = {
   shouldDisplayTooltipWarning: boolean,
   sshPort: string,
   username: string,
+  showRootCanalOption: boolean,
 };
 
 /** Component to prompt the user for connection details. */
@@ -94,7 +101,20 @@ export default class ConnectionDetailsForm extends React.Component<
       displayTitle: props.initialDisplayTitle,
       IPs: null,
       shouldDisplayTooltipWarning: false,
+      showRootCanalOption: false,
     };
+
+    passesGK('nuclide_rootcanal').then(showRootCanal => {
+      if (showRootCanal) {
+        authMethods = [
+          SupportedMethods.PASSWORD,
+          SupportedMethods.SSL_AGENT,
+          SupportedMethods.ROOTCANAL,
+          SupportedMethods.PRIVATE_KEY,
+        ];
+        this.setState({showRootCanalOption: true});
+      }
+    });
   }
 
   _onKeyPress(e: SyntheticKeyboardEvent<>): void {
@@ -236,6 +256,17 @@ export default class ConnectionDetailsForm extends React.Component<
     const sshAgentLabel = (
       <div className="nuclide-auth-method">Use ssh-agent</div>
     );
+    const rootCanalLabel = (
+      <div className="nuclide-auth-method">
+        Use CorpCanal Certificate (EXPERIMENTAL)
+      </div>
+    );
+    const labels = [passwordLabel, sshAgentLabel, privateKeyLabel];
+
+    if (this.state.showRootCanalOption) {
+      labels.splice(2, 0, rootCanalLabel);
+    }
+
     let toolTipWarning;
     if (this.state.shouldDisplayTooltipWarning) {
       toolTipWarning = (
@@ -244,6 +275,7 @@ export default class ConnectionDetailsForm extends React.Component<
           className={
             'icon icon-info pull-right nuclide-remote-projects-tooltip-warning'
           }
+          // eslint-disable-next-line nuclide-internal/jsx-simple-callback-refs
           ref={addTooltip({
             // Intentionally *not* an arrow function so the jQuery
             // Tooltip plugin can set the context to the Tooltip
@@ -317,10 +349,18 @@ export default class ConnectionDetailsForm extends React.Component<
         <div className="form-group">
           <label>Authentication method:</label>
           <RadioGroup
-            optionLabels={[passwordLabel, sshAgentLabel, privateKeyLabel]}
+            optionLabels={labels}
             onSelectedChange={this._handleAuthMethodChange}
             selectedIndex={this.state.selectedAuthMethodIndex}
           />
+          {PKEY_LINK != null &&
+            this.state.selectedAuthMethodIndex ===
+              authMethods.indexOf(SupportedMethods.PRIVATE_KEY) && (
+              <Message type="warning">
+                Private keys are going away soon. Please see{' '}
+                <Link href={PKEY_LINK}>this post</Link>.
+              </Message>
+            )}
         </div>
         <div className="form-group">
           <label>Remote Server Command:</label>

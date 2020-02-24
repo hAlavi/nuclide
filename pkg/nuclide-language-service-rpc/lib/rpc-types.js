@@ -61,6 +61,11 @@ export interface HostServices {
   applyTextEditsForMultipleFiles(
     changes: Map<NuclideUri, Array<TextEdit>>,
   ): Promise<boolean>;
+
+  dispatchCommand(
+    command: string,
+    params: {|args: any, projectRoot: NuclideUri|},
+  ): Promise<boolean>;
 }
 
 export interface Progress {

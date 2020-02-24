@@ -144,10 +144,14 @@ export function _clearFileParsers(): void {
 const memoizedBabylonParse = memoizeWithDisk(
   function babylonParse(src, options) {
     // External dependency: ensure that it's included in the key below.
-    const babylon = require('babylon');
+    const babylon = require('@babel/parser');
     return babylon.parse(src, options).program;
   },
-  (src, options) => [src, options, require('babylon/package.json').version],
+  (src, options) => [
+    src,
+    options,
+    require('@babel/parser/package.json').version,
+  ],
   nuclideUri.join(os.tmpdir(), 'nuclide-rpc-cache'),
 );
 
@@ -200,7 +204,16 @@ class FileParser {
   parse(source: string): void {
     const babylonOptions = {
       sourceType: 'module',
-      plugins: ['*', 'jsx', 'flow'],
+      plugins: [
+        'jsx',
+        'flow',
+        'exportExtensions',
+        'objectRestSpread',
+        'classProperties',
+        'nullishCoalescingOperator',
+        'optionalChaining',
+        'optionalCatchBinding',
+      ],
     };
     const program = memoizedBabylonParse(source, babylonOptions);
     invariant(
@@ -366,6 +379,7 @@ class FileParser {
     serviceParser: ServiceParser,
     declaration: any,
   ): FunctionDefinition {
+    // $FlowFixMe(>=0.68.0) Flow suppress (T27187857)
     if (this._fileType === 'import') {
       throw this._error(declaration, 'Exported function in imported RPC file');
     }
@@ -431,6 +445,7 @@ class FileParser {
     serviceParser: ServiceParser,
     declaration: Object,
   ): InterfaceDefinition {
+    // $FlowFixMe(>=0.68.0) Flow suppress (T27187857)
     if (this._fileType === 'import') {
       throw this._error(declaration, 'Exported class in imported RPC file');
     }
@@ -439,22 +454,22 @@ class FileParser {
       kind: 'interface',
       name: declaration.id.name,
       location: this._locationOfNode(declaration),
-      constructorArgs: [],
       staticMethods: {},
       instanceMethods: {},
     };
 
     const classBody = declaration.body;
     for (const method of classBody.body) {
-      if (method.kind === 'constructor') {
-        def.constructorArgs = method.params.map(param =>
-          this._parseParameter(serviceParser, param),
-        );
-        if (method.returnType) {
-          throw this._error(method, 'constructors may not have return types');
-        }
-      } else {
+      if (method.kind !== 'constructor') {
         if (!isPrivateMemberName(method.key.name)) {
+          if (method.type !== 'ClassMethod') {
+            throw this._error(
+              method,
+              'Class fields that are not methods are not supported. If this ' +
+                'field is supposed to be private please prefix it with an ' +
+                'underscore.',
+            );
+          }
           const {name, type} = this._parseClassMethod(serviceParser, method);
           const isStatic = Boolean(method.static);
           this._validateMethod(method, name, type, isStatic);
@@ -507,7 +522,6 @@ class FileParser {
       kind: 'interface',
       name: declaration.id.name,
       location: this._locationOfNode(declaration),
-      constructorArgs: null,
       staticMethods: {},
       instanceMethods: {},
     };
@@ -573,7 +587,7 @@ class FileParser {
     this._assert(
       definition,
       definition.key && definition.key.type === 'Identifier',
-      'This method defintion has an key (a name).',
+      'This method definition has an key (a name).',
     );
     this._assert(
       definition,
@@ -744,7 +758,7 @@ class FileParser {
         return {kind: 'boolean'};
       case 'StringLiteralTypeAnnotation':
         return {kind: 'string-literal', value: typeAnnotation.value};
-      case 'NumericLiteralTypeAnnotation':
+      case 'NumberLiteralTypeAnnotation':
         return {kind: 'number-literal', value: typeAnnotation.value};
       case 'BooleanLiteralTypeAnnotation':
         return {kind: 'boolean-literal', value: typeAnnotation.value};

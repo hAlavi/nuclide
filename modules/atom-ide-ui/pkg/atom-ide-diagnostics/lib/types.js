@@ -18,8 +18,9 @@ import type {
   CodeAction,
   CodeActionFetcher,
 } from '../../atom-ide-code-actions/lib/types';
+import * as React from 'react';
 
-export type UiConfig = Array<{providerName: string, settings: Array<string>}>;
+export type UiConfig = Array<{|providerName: string, settings: Array<string>|}>;
 
 export type DiagnosticProvider =
   | CallbackDiagnosticProvider
@@ -90,12 +91,14 @@ export type DiagnosticAction = {
 };
 
 export type DiagnosticMessage = {|
+  id?: ?string,
   kind?: DiagnosticMessageKind,
   providerName: string,
   type: DiagnosticMessageType, // TODO: Rename to severity.
   filePath: NuclideUri,
   text?: string,
   html?: string,
+  +description?: string | (() => Promise<string> | string),
   range?: atom$Range,
   trace?: Array<DiagnosticTrace>,
   fix?: DiagnosticFix,
@@ -104,12 +107,17 @@ export type DiagnosticMessage = {|
   // Indicates that the message should still be displayed, but there should be some UI indicating
   // that it is out of date. TODO(matthewwithanm) implement this UI.
   stale?: boolean,
+  code?: number,
+  getBlockComponent?: ?() => React.ComponentType<any>,
 |};
 
-export type DiagnosticMessages = {
+export type DiagnosticMessages = {|
   filePath: NuclideUri,
+  // Note: This list of messages can be incomplete. A simple comparison of
+  // `messages.length === totalMessages` can be used to determine if it is complete.
   messages: Array<DiagnosticMessage>,
-};
+  totalMessages: number,
+|};
 
 export type {default as DiagnosticUpdater} from './services/DiagnosticUpdater';
 
@@ -148,6 +156,7 @@ export type LinterMessageV1 = {
 };
 
 export type LinterMessageV2 = {
+  id?: string,
   type?: void, // Hint for Flow.
   location: {
     file: string,
@@ -169,26 +178,27 @@ export type LinterMessageV2 = {
   // TODO: only the first solution is used at the moment.
   solutions?: Array<
     | {
-      title?: string,
-      position: atom$RangeLike,
-      priority?: number,
-      currentText?: string,
-      replaceWith: string,
-    }
+        title?: string,
+        position: atom$RangeLike,
+        priority?: number,
+        currentText?: string,
+        replaceWith: string,
+      }
     | {
-      // TODO: not currently supported.
-      title?: string,
-      position: atom$RangeLike,
-      priority?: number,
-      apply: () => any,
-      replaceWith?: void, // Hint for Flow.
-    },
+        // TODO: not currently supported.
+        title?: string,
+        position: atom$RangeLike,
+        priority?: number,
+        apply: () => any,
+        replaceWith?: void, // Hint for Flow.
+      },
   >,
   // TODO: the callback version is not supported.
   description?: string | (() => Promise<string> | string),
   linterName?: string,
   // custom extension
   kind?: DiagnosticMessageKind,
+  getBlockComponent?: ?() => React.ComponentType<any>,
 };
 
 export type LinterMessage = LinterMessageV1 | LinterMessageV2;
@@ -229,7 +239,9 @@ export type AppState = {
   messages: MessagesState,
   codeActionFetcher: ?CodeActionFetcher,
   codeActionsForMessage: CodeActionsState,
+  descriptions: DescriptionsState,
   providers: Set<ObservableDiagnosticProvider>,
+  lastUpdateSource: LastUpdateSource,
 };
 
 export type MessagesState = Map<
@@ -237,9 +249,13 @@ export type MessagesState = Map<
   Map<NuclideUri, Array<DiagnosticMessage>>,
 >;
 
+export type LastUpdateSource = 'Provider' | 'Stale';
+
 export type CodeActionsState = Map<DiagnosticMessage, Map<string, CodeAction>>;
+export type DescriptionsState = Map<DiagnosticMessage, string>;
 
 export type Store = {
+  subscribe(() => void): () => void,
   getState(): AppState,
   dispatch(action: Action): void,
 };
@@ -247,62 +263,78 @@ export type Store = {
 export type Action =
   // Providers
   | {
-    type: 'ADD_PROVIDER',
-    payload: {provider: ObservableDiagnosticProvider},
-  }
+      type: 'ADD_PROVIDER',
+      payload: {provider: ObservableDiagnosticProvider},
+    }
   | {
-    type: 'REMOVE_PROVIDER',
-    payload: {provider: ObservableDiagnosticProvider},
-  }
+      type: 'REMOVE_PROVIDER',
+      payload: {provider: ObservableDiagnosticProvider},
+    }
 
   // Code Actions
   | {
-    type: 'SET_CODE_ACTION_FETCHER',
-    payload: {codeActionFetcher: ?CodeActionFetcher},
-  }
+      type: 'SET_CODE_ACTION_FETCHER',
+      payload: {codeActionFetcher: ?CodeActionFetcher},
+    }
   | {
-    type: 'FETCH_CODE_ACTIONS',
-    payload: {editor: atom$TextEditor, messages: Array<DiagnosticMessage>},
-  }
+      type: 'FETCH_CODE_ACTIONS',
+      payload: {editor: atom$TextEditor, messages: Array<DiagnosticMessage>},
+    }
   | {
-    type: 'SET_CODE_ACTIONS',
-    payload: {codeActionsForMessage: CodeActionsState},
-  }
+      type: 'SET_CODE_ACTIONS',
+      payload: {codeActionsForMessage: CodeActionsState},
+    }
+
+  // Description
+  | {
+      type: 'FETCH_DESCRIPTIONS',
+      payload: {messages: Array<DiagnosticMessage>},
+    }
+  | {
+      type: 'SET_DESCRIPTIONS',
+      payload: {descriptions: DescriptionsState, keepDescriptions: boolean},
+    }
 
   // Fixes
   | {
-    type: 'APPLY_FIX',
-    payload: {
-      message: DiagnosticMessage,
-    },
-  }
+      type: 'APPLY_FIX',
+      payload: {
+        message: DiagnosticMessage,
+      },
+    }
   | {
-    type: 'APPLY_FIXES_FOR_FILE',
-    payload: {
-      file: NuclideUri,
-    },
-  }
+      type: 'APPLY_FIXES_FOR_FILE',
+      payload: {
+        file: NuclideUri,
+      },
+    }
   | {type: 'FIX_FAILED'}
   | {
-    type: 'FIXES_APPLIED',
-    payload: {
-      filePath: NuclideUri,
-      messages: Set<DiagnosticMessage>,
-    },
-  }
+      type: 'FIXES_APPLIED',
+      payload: {
+        filePath: NuclideUri,
+        messages: Set<DiagnosticMessage>,
+      },
+    }
 
   // Messages
   | {
-    type: 'UPDATE_MESSAGES',
-    payload: {
-      provider: ObservableDiagnosticProvider,
-      update: DiagnosticProviderUpdate,
-    },
-  }
+      type: 'UPDATE_MESSAGES',
+      payload: {
+        provider: ObservableDiagnosticProvider,
+        update: DiagnosticProviderUpdate,
+      },
+    }
   | {
-    type: 'INVALIDATE_MESSAGES',
-    payload: {
-      provider: ObservableDiagnosticProvider,
-      invalidation: DiagnosticInvalidationMessage,
-    },
-  };
+      type: 'INVALIDATE_MESSAGES',
+      payload: {
+        provider: ObservableDiagnosticProvider,
+        invalidation: DiagnosticInvalidationMessage,
+      },
+    }
+  | {
+      type: 'MARK_MESSAGES_STALE',
+      payload: {
+        filePath: NuclideUri,
+      },
+    };

@@ -18,8 +18,10 @@ import type {CoverageResult} from '../../nuclide-type-coverage/lib/rpc-types';
 import type {
   DefinitionQueryResult,
   FindReferencesReturn,
+  RenameReturn,
   Outline,
   CodeAction,
+  SignatureHelp,
 } from 'atom-ide-ui';
 import type {
   AutocompleteRequest,
@@ -29,10 +31,12 @@ import type {
   FormatOptions,
   LanguageService,
   SymbolResult,
+  Completion,
+  CodeLensData,
+  StatusData,
 } from '../../nuclide-language-service/lib/LanguageService';
 import type {FileNotifier} from '../../nuclide-open-files-rpc/lib/rpc-types';
 import type {ConnectableObservable} from 'rxjs';
-import type {NuclideEvaluationExpression} from 'nuclide-debugger-common';
 
 import invariant from 'assert';
 import {getBufferAtVersion} from '../../nuclide-open-files-rpc';
@@ -59,6 +63,8 @@ export type SingleFileLanguageService = {
     prefix: string,
   ): Promise<?AutocompleteResult>,
 
+  resolveAutocompleteSuggestion(suggestion: Completion): Promise<?Completion>,
+
   getDefinition(
     filePath: NuclideUri,
     buffer: simpleTextBuffer$TextBuffer,
@@ -71,12 +77,21 @@ export type SingleFileLanguageService = {
     position: atom$Point,
   ): Observable<?FindReferencesReturn>,
 
+  rename(
+    filePath: NuclideUri,
+    buffer: simpleTextBuffer$TextBuffer,
+    position: atom$Point,
+    newName: string,
+  ): Observable<?RenameReturn>,
+
   getCoverage(filePath: NuclideUri): Promise<?CoverageResult>,
 
   getOutline(
     filePath: NuclideUri,
     buffer: simpleTextBuffer$TextBuffer,
   ): Promise<?Outline>,
+
+  onToggleCoverage(set: boolean): Promise<void>,
 
   getCodeActions(
     filePath: NuclideUri,
@@ -121,11 +136,11 @@ export type SingleFileLanguageService = {
     options: FormatOptions,
   ): Promise<?Array<TextEdit>>,
 
-  getEvaluationExpression(
+  signatureHelp(
     filePath: NuclideUri,
     buffer: simpleTextBuffer$TextBuffer,
     position: atom$Point,
-  ): Promise<?NuclideEvaluationExpression>,
+  ): Promise<?SignatureHelp>,
 
   getProjectRoot(fileUri: NuclideUri): Promise<?NuclideUri>,
 
@@ -196,6 +211,12 @@ export class ServerLanguageService<
     );
   }
 
+  async resolveAutocompleteSuggestion(
+    suggestion: Completion,
+  ): Promise<?Completion> {
+    return this._service.resolveAutocompleteSuggestion(suggestion);
+  }
+
   async getDefinition(
     fileVersion: FileVersion,
     position: atom$Point,
@@ -223,8 +244,28 @@ export class ServerLanguageService<
       .publish();
   }
 
+  rename(
+    fileVersion: FileVersion,
+    position: atom$Point,
+    newName: string,
+  ): ConnectableObservable<?RenameReturn> {
+    const filePath = fileVersion.filePath;
+    return Observable.fromPromise(getBufferAtVersion(fileVersion))
+      .concatMap(buffer => {
+        if (buffer == null) {
+          return Observable.of(null);
+        }
+        return this._service.rename(filePath, buffer, position, newName);
+      })
+      .publish();
+  }
+
   getCoverage(filePath: NuclideUri): Promise<?CoverageResult> {
     return this._service.getCoverage(filePath);
+  }
+
+  onToggleCoverage(set: boolean): Promise<void> {
+    return this._service.onToggleCoverage(set);
   }
 
   async getAdditionalLogFiles(): Promise<Array<AdditionalLogFile>> {
@@ -248,6 +289,17 @@ export class ServerLanguageService<
       return null;
     }
     return this._service.getOutline(filePath, buffer);
+  }
+
+  async getCodeLens(fileVersion: FileVersion): Promise<?Array<CodeLensData>> {
+    return null;
+  }
+
+  async resolveCodeLens(
+    filePath: NuclideUri,
+    codeLens: CodeLensData,
+  ): Promise<?CodeLensData> {
+    return null;
   }
 
   async typeHint(
@@ -323,16 +375,16 @@ export class ServerLanguageService<
     );
   }
 
-  async getEvaluationExpression(
+  async signatureHelp(
     fileVersion: FileVersion,
     position: atom$Point,
-  ): Promise<?NuclideEvaluationExpression> {
+  ): Promise<?SignatureHelp> {
     const filePath = fileVersion.filePath;
     const buffer = await getBufferAtVersion(fileVersion);
     if (buffer == null) {
       return null;
     }
-    return this._service.getEvaluationExpression(filePath, buffer, position);
+    return this._service.signatureHelp(filePath, buffer, position);
   }
 
   supportsSymbolSearch(directories: Array<NuclideUri>): Promise<boolean> {
@@ -393,6 +445,34 @@ export class ServerLanguageService<
     );
   }
 
+  observeStatus(fileVersion: FileVersion): ConnectableObservable<StatusData> {
+    return Observable.of({kind: 'null'}).publish();
+  }
+
+  onWillSave(fileVersion: FileVersion): ConnectableObservable<TextEdit> {
+    return Observable.empty().publish();
+  }
+
+  async clickStatus(
+    fileVersion: FileVersion,
+    id: string,
+    button: string,
+  ): Promise<void> {}
+
+  async sendLspRequest(
+    filePath: NuclideUri,
+    method: string,
+    params: mixed,
+  ): Promise<mixed> {}
+
+  async sendLspNotification(method: string, params: mixed): Promise<void> {}
+
+  observeLspNotifications(
+    notificationMethod: string,
+  ): ConnectableObservable<mixed> {
+    return Observable.empty().publish();
+  }
+
   dispose(): void {
     this._service.dispose();
   }
@@ -410,10 +490,10 @@ export function ensureInvalidations(
     (diagnosticMap: FileDiagnosticMap) => {
       for (const [filePath, messages] of diagnosticMap) {
         if (messages.length === 0) {
-          logger.debug(`Removing ${filePath} from files with errors`);
+          logger.trace(`Removing ${filePath} from files with errors`);
           filesWithErrors.delete(filePath);
         } else {
-          logger.debug(`Adding ${filePath} to files with errors`);
+          logger.trace(`Adding ${filePath} to files with errors`);
           filesWithErrors.add(filePath);
         }
       }

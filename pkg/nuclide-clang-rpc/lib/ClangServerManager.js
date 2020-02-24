@@ -9,14 +9,15 @@
  * @format
  */
 
+import type {LRUCache as LRUCacheType} from 'lru-cache';
 import type {ClangServerFlags} from './ClangServer';
-import type {ClangRequestSettings} from './rpc-types';
+import type {ClangRequestSettings, ClangServerSettings} from './rpc-types';
 
 import LRUCache from 'lru-cache';
 import os from 'os';
 
-import {runCommand} from 'nuclide-commons/process';
 import {serializeAsyncCall} from 'nuclide-commons/promise';
+import {memoryUsagePerPid} from 'nuclide-commons/process';
 import {getLogger} from 'log4js';
 import ClangFlagsManager from './ClangFlagsManager';
 import ClangServer from './ClangServer';
@@ -26,7 +27,7 @@ import findClangServerArgs from './find-clang-server-args';
 const SERVER_LIMIT = 20;
 
 // Limit the total memory usage of all Clang servers.
-const DEFAULT_MEMORY_LIMIT = Math.round(os.totalmem() * 15 / 100);
+const DEFAULT_MEMORY_LIMIT = Math.round((os.totalmem() * 15) / 100);
 
 let _getDefaultFlags;
 async function augmentDefaultFlags(
@@ -50,7 +51,7 @@ async function augmentDefaultFlags(
 
 export default class ClangServerManager {
   _flagsManager: ClangFlagsManager;
-  _servers: LRUCache<string, ClangServer>;
+  _servers: LRUCacheType<string, ClangServer>;
   _checkMemoryUsage: () => Promise<number>;
   _memoryLimit: number = DEFAULT_MEMORY_LIMIT;
 
@@ -73,7 +74,7 @@ export default class ClangServerManager {
   }
 
   setMemoryLimit(percent: number) {
-    this._memoryLimit = Math.round(Math.abs(os.totalmem() * percent / 100));
+    this._memoryLimit = Math.round(Math.abs((os.totalmem() * percent) / 100));
     this._checkMemoryUsage();
   }
 
@@ -90,12 +91,16 @@ export default class ClangServerManager {
     src: string,
     contents: string,
     _requestSettings: ?ClangRequestSettings,
-    defaultFlags?: ?Array<string>,
+    _defaultSettings?: ClangServerSettings,
     restartIfChanged?: boolean,
   ): ClangServer {
     const requestSettings = _requestSettings || {
       compilationDatabase: null,
       projectRoot: null,
+    };
+    const defaultSettings = _defaultSettings || {
+      libclangPath: null,
+      defaultFlags: null,
     };
     let server = this._servers.get(src);
     if (server != null) {
@@ -112,8 +117,9 @@ export default class ClangServerManager {
       findClangServerArgs(
         src,
         compilationDB == null ? null : compilationDB.libclangPath,
+        defaultSettings.libclangPath,
       ),
-      this._getFlags(src, requestSettings, defaultFlags),
+      this._getFlags(src, requestSettings, defaultSettings),
     );
     server.waitForReady().then(() => this._checkMemoryUsage());
     this._servers.set(src, server);
@@ -125,7 +131,7 @@ export default class ClangServerManager {
   async _getFlags(
     src: string,
     requestSettings: ClangRequestSettings,
-    defaultFlags: ?Array<string>,
+    defaultSettings: ClangServerSettings,
   ): Promise<?ClangServerFlags> {
     const flagsData = await this._flagsManager
       .getFlagsForSrc(src, requestSettings)
@@ -144,9 +150,9 @@ export default class ClangServerManager {
         usesDefaultFlags: false,
         flagsFile: flagsData.flagsFile,
       };
-    } else if (defaultFlags != null) {
+    } else if (defaultSettings.defaultFlags != null) {
       return {
-        flags: await augmentDefaultFlags(src, defaultFlags),
+        flags: await augmentDefaultFlags(src, defaultSettings.defaultFlags),
         usesDefaultFlags: true,
         flagsFile: flagsData != null ? flagsData.flagsFile : null,
       };
@@ -171,6 +177,7 @@ export default class ClangServerManager {
 
   async _checkMemoryUsageImpl(): Promise<number> {
     const serverPids = this._servers
+      // $FlowFixMe Missing in typings
       .values()
       .map(server => server.getPID())
       .filter(Boolean);
@@ -178,34 +185,15 @@ export default class ClangServerManager {
       return 0;
     }
 
-    let total = 0;
-    const usage = new Map();
-    try {
-      const stdout = await runCommand('ps', [
-        '-p',
-        serverPids.join(','),
-        '-o',
-        'pid=',
-        '-o',
-        'rss=',
-      ]).toPromise();
-      stdout.split('\n').forEach(line => {
-        const parts = line.split(/\s+/);
-        if (parts.length === 2) {
-          const [pid, rss] = parts.map(x => parseInt(x, 10));
-          usage.set(pid, rss);
-          total += rss;
-        }
-      });
-    } catch (err) {
-      // Ignore errors.
-    }
+    const usage = await memoryUsagePerPid(serverPids);
+    let total = Array.from(usage.values()).reduce((a, b) => a + b, 0);
 
     // Remove servers until we're under the memory limit.
     // Make sure we allow at least one server to stay alive.
     let count = usage.size;
     if (count > 1 && total > this._memoryLimit) {
       const toDispose = [];
+      // $FlowFixMe Missing in typings
       this._servers.rforEach((server, key) => {
         const mem = usage.get(server.getPID());
         if (mem != null && count > 1 && total > this._memoryLimit) {

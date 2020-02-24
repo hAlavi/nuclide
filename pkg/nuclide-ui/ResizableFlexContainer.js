@@ -11,7 +11,7 @@
 
 import {arrayCompact, arrayEqual} from 'nuclide-commons/collection';
 import classnames from 'classnames';
-import createPaneContainer from '../commons-atom/create-pane-container';
+import createPaneContainer from 'nuclide-commons-atom/create-pane-container';
 import nullthrows from 'nullthrows';
 import * as React from 'react';
 import ReactDOM from 'react-dom';
@@ -56,7 +56,7 @@ export class ResizableFlexContainer extends React.Component<Props> {
     this._renderPanes();
   }
 
-  componentWillReceiveProps(newProps: Props): void {
+  UNSAFE_componentWillReceiveProps(newProps: Props): void {
     if (
       !arrayEqual(
         getChildrenFlexScales(this.props.children),

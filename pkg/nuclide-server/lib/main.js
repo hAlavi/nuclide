@@ -10,19 +10,21 @@
  */
 
 import fsPromise from 'nuclide-commons/fsPromise';
+import {Emitter} from 'event-kit';
 import {
   flushLogsAndAbort,
   flushLogsAndExit,
   initializeLogging,
 } from '../../nuclide-logging';
-import {startTracking} from '../../nuclide-analytics';
+import {startTracking} from 'nuclide-analytics';
+
 import NuclideServer from './NuclideServer';
 import servicesConfig from './servicesConfig';
 
 import yargs from 'yargs';
 import {getLogger} from 'log4js';
 
-const DEFAULT_PORT = 9090;
+const DEFAULT_PORT = 9091;
 
 const logger = getLogger('nuclide-server');
 
@@ -44,11 +46,12 @@ async function getServerCredentials(args) {
 }
 
 async function main(args) {
-  const serverStartTimer = startTracking('nuclide-server:start');
-  process.on('SIGHUP', () => {});
-
+  let serverStartTimer;
   try {
+    process.on('SIGHUP', () => {});
     initializeLogging();
+    serverStartTimer = startTracking('nuclide-server:start');
+
     const {port, expirationDays} = args;
     if (expirationDays) {
       setTimeout(() => {
@@ -73,7 +76,9 @@ async function main(args) {
     logger.info(`Using node ${process.version}.`);
     logger.info(`Server ready time: ${process.uptime() * 1000}ms`);
   } catch (e) {
-    serverStartTimer.onError(e);
+    if (serverStartTimer != null) {
+      serverStartTimer.onError(e);
+    }
     logger.fatal(e);
     flushLogsAndAbort();
   }
@@ -101,6 +106,10 @@ process.on('uncaughtException', err => {
 // We include this code here in anticipation of the Node/io.js merger.
 process.on('unhandledRejection', (error, promise) => {
   logger.error(`Unhandled promise rejection ${promise}. Error:`, error);
+});
+
+Emitter.onEventHandlerException(error => {
+  logger.error('Caught server event handler exception', error);
 });
 
 const argv = yargs.default('port', DEFAULT_PORT).argv;

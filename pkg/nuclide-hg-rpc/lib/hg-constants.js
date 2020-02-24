@@ -5,11 +5,9 @@
  * This source code is licensed under the license found in the LICENSE file in
  * the root directory of this source tree.
  *
- * @flow
+ * @flow strict-local
  * @format
  */
-
-/* @providesModule HgConstants */
 
 import type {
   AmendModeValue,
@@ -20,7 +18,7 @@ import type {
   StatusCodeNumberValue,
   SuccessorTypeValue,
   HisteditActionsValue,
-} from './HgService';
+} from './types';
 
 const StatusCodeId = Object.freeze({
   ADDED: 'A',
@@ -98,6 +96,7 @@ const SuccessorType = Object.freeze({
   SPLIT: 'split',
   FOLD: 'fold',
   HISTEDIT: 'histedit',
+  REWRITTEN: 'rewritten', // used by commit cloud as a "catch-all" successor
 });
 
 // This is to work around flow's missing support of enums.
@@ -112,6 +111,7 @@ const MergeConflictFileStatus = Object.freeze({
 
 const HEAD_REVISION_EXPRESSION = '.';
 const PARENT_REVISION_EXPRESSION = '.^';
+const STACK_BASE_REVISION_EXPRESSION = 'ancestor(.,master)';
 
 const HisteditActions = Object.freeze({
   PICK: 'pick',
@@ -141,12 +141,13 @@ const LockFilesList: Array<string> = [
   LockFiles.WLOCK,
 ];
 
-// eslint-disable-next-line rulesdir/no-commonjs
+// eslint-disable-next-line nuclide-internal/no-commonjs
 module.exports = {
   AmendMode,
   CommitPhase,
   HEAD_REVISION_EXPRESSION,
   PARENT_REVISION_EXPRESSION,
+  STACK_BASE_REVISION_EXPRESSION,
   MergeConflictStatus,
   MergeConflictFileStatus,
   StatusCodeId,

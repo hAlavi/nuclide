@@ -25,9 +25,8 @@ import {asyncFind} from 'nuclide-commons/promise';
 import createPackage from 'nuclide-commons-atom/createPackage';
 import ContextMenu from 'nuclide-commons-atom/ContextMenu';
 import {bufferPositionForMouseEvent} from 'nuclide-commons-atom/mouse-to-position';
-import {observeTextEditors} from 'nuclide-commons-atom/text-editor';
 import UniversalDisposable from 'nuclide-commons/UniversalDisposable';
-import analytics from 'nuclide-commons-atom/analytics';
+import analytics from 'nuclide-commons/analytics';
 import {FindReferencesViewModel} from './FindReferencesViewModel';
 import {getLogger} from 'log4js';
 import FindReferencesModel from './FindReferencesModel';
@@ -85,7 +84,7 @@ function openViewModel(view: ?FindReferencesViewModel): void {
     }
   });
   // not a file URI
-  // eslint-disable-next-line rulesdir/atom-apis
+  // eslint-disable-next-line nuclide-internal/atom-apis
   atom.workspace.open(view.getURI());
   // The new tab opens instantly, so this is no longer needed.
   disposable.dispose();
@@ -183,7 +182,7 @@ class Activation {
       ),
       // Mark text editors with a working provider with a special CSS class.
       // This ensures the context menu option only appears in supported projects.
-      observeTextEditors(async editor => {
+      atom.workspace.observeTextEditors(async editor => {
         const path = editor.getPath();
         // flowlint-next-line sketchy-null-string:off
         if (!path || this._supportedProviders.get(editor)) {
@@ -260,7 +259,10 @@ class Activation {
       supported.map(provider =>
         provider.findReferences(editor, point).catch(err => {
           getLogger('find-references').error('Error finding references', err);
-          return null;
+          return {
+            type: 'error',
+            message: String(err),
+          };
         }),
       ),
       x => x,

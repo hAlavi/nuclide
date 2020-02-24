@@ -20,23 +20,35 @@ import type {ProcessMessage} from 'nuclide-commons/process';
 
 import VsAdapterSpawner from './VsAdapterSpawner';
 import V8Protocol from './V8Protocol';
-import {Observable, Subject} from 'rxjs';
+import {Observable, Subject, TimeoutError} from 'rxjs';
 import idx from 'idx';
 import invariant from 'assert';
+import {track, trackTiming} from 'nuclide-commons/analytics';
+import uuid from 'uuid';
 
 export interface AdapterExitedEvent extends DebugProtocol.DebugEvent {
   event: 'adapter-exited';
   body: {exitCode: number};
 }
 
+export type AdapterAnalyticsExtras = {
+  adapter: string,
+  host: string,
+  isRemote: boolean,
+};
+
 function raiseAdapterExitedEvent(exitCode: number): AdapterExitedEvent {
   return {
     seq: 0,
     type: 'event',
     event: 'adapter-exited',
-    body: {exitCode: 0},
+    body: {exitCode},
   };
 }
+
+type RunInTerminalHandler = (
+  arguments: DebugProtocol.RunInTerminalRequestArguments,
+) => Promise<void>;
 
 /**
  * Use V8 JSON-RPC protocol to send & receive messages
@@ -51,8 +63,9 @@ export default class VsDebugSession extends V8Protocol {
 
   capabilities: DebugProtocol.Capabilities;
   _adapterExecutable: VSAdapterExecutableInfo;
-  _logger: log4js$Logger;
   _spawner: IVsAdapterSpawner;
+  _adapterAnalyticsExtras: AdapterAnalyticsExtras;
+  _adapterErrorOutput: string;
 
   _onDidInitialize: Subject<DebugProtocol.InitializedEvent>;
   _onDidStop: Subject<DebugProtocol.StoppedEvent>;
@@ -67,20 +80,32 @@ export default class VsDebugSession extends V8Protocol {
   _onDidLoadSource: Subject<DebugProtocol.LoadedSourceEvent>;
   _onDidCustom: Subject<DebugProtocol.DebugEvent>;
   _onDidEvent: Subject<DebugProtocol.Event | AdapterExitedEvent>;
+  _onDidEvaluate: Subject<void>;
+  _runInTerminalHandler: ?RunInTerminalHandler;
+  _isReadOnly: boolean;
 
   constructor(
     id: string,
     logger: log4js$Logger,
     adapterExecutable: VSAdapterExecutableInfo,
+    adapterAnalyticsExtras: ?AdapterAnalyticsExtras,
     spawner?: IVsAdapterSpawner,
     sendPreprocessors?: MessageProcessor[] = [],
     receivePreprocessors?: MessageProcessor[] = [],
+    runInTerminalHandler?: RunInTerminalHandler,
+    isReadOnly?: boolean = false,
   ) {
     super(id, logger, sendPreprocessors, receivePreprocessors);
     this._adapterExecutable = adapterExecutable;
-    this._logger = logger;
     this._readyForBreakpoints = false;
     this._spawner = spawner == null ? new VsAdapterSpawner() : spawner;
+    this._isReadOnly = isReadOnly;
+    this._adapterAnalyticsExtras = {
+      ...adapterAnalyticsExtras,
+      // $FlowFixMe flow doesn't consider uuid callable, but it is
+      debuggerSessionId: uuid(),
+    };
+    this._adapterErrorOutput = '';
 
     this._onDidInitialize = new Subject();
     this._onDidStop = new Subject();
@@ -95,6 +120,9 @@ export default class VsDebugSession extends V8Protocol {
     this._onDidLoadSource = new Subject();
     this._onDidCustom = new Subject();
     this._onDidEvent = new Subject();
+    this._onDidEvaluate = new Subject();
+    this.capabilities = {};
+    this._runInTerminalHandler = runInTerminalHandler || null;
   }
 
   observeInitializeEvents(): Observable<DebugProtocol.InitializedEvent> {
@@ -145,6 +173,10 @@ export default class VsDebugSession extends V8Protocol {
     return this._onDidCustom.asObservable();
   }
 
+  observeEvaluations(): Observable<void> {
+    return this._onDidEvaluate.asObservable();
+  }
+
   observeAllEvents(): Observable<DebugProtocol.Event | AdapterExitedEvent> {
     return this._onDidEvent.asObservable();
   }
@@ -163,31 +195,139 @@ export default class VsDebugSession extends V8Protocol {
   }
 
   send(command: string, args: any): Promise<any> {
-    this._logger.info('Send request:', command, args);
     this._initServer();
-    // Babel Bug: `super` isn't working with `async`.
-    return super.send(command, args).then(
-      response => {
-        this._logger.info('Received response:', response);
-        return response;
-      },
-      (errorResponse: DebugProtocol.ErrorResponse) => {
-        let formattedError =
-          idx(errorResponse, _ => _.body.error.format) ||
-          idx(errorResponse, _ => _.message);
-        if (formattedError === '{_stack}') {
-          formattedError = JSON.stringify(errorResponse.body.error);
-        } else if (formattedError == null) {
-          formattedError = [
-            `command: ${command}`,
-            `args: ${JSON.stringify(args)}`,
-            `response: ${JSON.stringify(errorResponse)}`,
-            `adapterExecutable: , ${JSON.stringify(this._adapterExecutable)}`,
-          ].join(', ');
-        }
-        throw new Error(formattedError);
-      },
+
+    const operation = (): Promise<any> => {
+      // Babel Bug: `super` isn't working with `async`
+      return super.send(command, args).then(
+        (response: DebugProtocol.Response) => {
+          const sanitizedResponse = this._sanitizeResponse(response);
+          track('vs-debug-session:transaction', {
+            ...this._adapterAnalyticsExtras,
+            request: {command, arguments: args},
+            response: sanitizedResponse,
+          });
+          return response;
+        },
+        (errorResponse: DebugProtocol.ErrorResponse) => {
+          let errorMessage = null;
+          let showUser = false;
+          const errorFormatString = errorResponse.body?.error?.format || '';
+          if (errorFormatString !== '') {
+            const errorObject: DebugProtocol.Message = (errorResponse.body
+              .error: any);
+            // Protocol response contained an ErrorResponse with details
+            // about how the debug adapter wants us to handle the error.
+            errorMessage = String(errorFormatString);
+            showUser = Boolean(errorObject.showUser);
+            const variables = errorObject.variables;
+            if (variables != null) {
+              for (const key of Object.keys(variables)) {
+                const pattern = new RegExp('{' + key + '}', 'g');
+                errorMessage = errorMessage.replace(pattern, variables[key]);
+              }
+            }
+
+            // TODO: Allow the consumer of the session to register a global
+            // error handler routine so we can still present errors even
+            // when running outside of Atom.
+            if (Boolean(showUser) && typeof atom !== 'undefined') {
+              atom.notifications.addError(errorMessage);
+            }
+          } else if (errorResponse.message != null) {
+            // Response message contained a user-facing string to display.
+            errorMessage = errorResponse.message;
+          } else {
+            // See if Response message contained a user-facing string to display.
+            // The protocol expects message to be on result, not result.body
+            // but some debug adapters are doing this incorrectly. Work with
+            // them anyway...
+            // $FlowIgnore
+            errorMessage = errorResponse.body?.message;
+          }
+
+          track('vs-debug-session:transaction', {
+            ...this._adapterAnalyticsExtras,
+            request: {command, arguments: args},
+            response: errorResponse,
+          });
+
+          if (errorMessage != null) {
+            throw new Error(errorMessage);
+          }
+
+          // If the debug adapter didn't specify what error to
+          // show the user, fallback to logging the request/response info.
+          let formattedError =
+            idx(errorResponse, _ => _.body.error.format) ||
+            idx(errorResponse, _ => _.message);
+          if (formattedError === '{_stack}') {
+            formattedError = JSON.stringify(errorResponse.body.error);
+          } else if (formattedError == null) {
+            formattedError = [
+              `command: ${command}`,
+              `args: ${JSON.stringify(args)}`,
+              `response: ${JSON.stringify(errorResponse)}`,
+              `adapterExecutable: , ${JSON.stringify(this._adapterExecutable)}`,
+            ].join(', ');
+          }
+          throw new Error(formattedError);
+        },
+      );
+    };
+
+    return trackTiming(
+      `vs-debug-session:${command}`,
+      operation,
+      this._adapterAnalyticsExtras,
     );
+  }
+
+  _sanitizeResponse(
+    response: DebugProtocol.base$Response,
+  ): DebugProtocol.base$Response {
+    try {
+      if (response.command === 'variables') {
+        const varResponse = ((response: any): DebugProtocol.VariablesResponse);
+        const sanResponse = {
+          ...varResponse,
+          body: {
+            ...varResponse.body,
+            variables: varResponse.body.variables.map(v => ({
+              ...v,
+              value: '<elided>',
+            })),
+          },
+        };
+        // $FlowFixMe flow isn't recognizing that ...varResponse is filling in needed members
+        return sanResponse;
+      }
+      if (response.command === 'evaluate') {
+        const evalResponse = ((response: any): DebugProtocol.EvaluateResponse);
+        const sanResponse = {
+          ...evalResponse,
+          body: {
+            ...evalResponse.body,
+            result: '<elided>',
+          },
+        };
+        // $FlowFixMe flow isn't recognizing that ...evalResponse is filling in needed members
+        return sanResponse;
+      }
+      return response;
+    } catch (e) {
+      // Don't let a malformed response prevent the response from bubbling up
+      // to the debugger
+      return {
+        type: 'response',
+        seq: response.seq,
+        request_seq: response.request_seq,
+        success: false,
+        command: response.command,
+        error: 'Error sanitizing response.',
+        message: e.message,
+      };
+    }
   }
 
   onEvent(event: DebugProtocol.Event | AdapterExitedEvent): void {
@@ -198,6 +338,11 @@ export default class VsDebugSession extends V8Protocol {
       // $FlowFixMe `event.body` type def.
       event.body = {sessionId: this.getId()};
     }
+
+    track('vs-debug-session:transaction', {
+      ...this._adapterAnalyticsExtras,
+      event,
+    });
 
     this._onDidEvent.next(event);
 
@@ -244,7 +389,7 @@ export default class VsDebugSession extends V8Protocol {
   }
 
   getCapabilities(): DebugProtocol.Capabilities {
-    return this.capabilities || {};
+    return this.capabilities;
   }
 
   async initialize(
@@ -279,6 +424,10 @@ export default class VsDebugSession extends V8Protocol {
   }
 
   next(args: DebugProtocol.NextArguments): Promise<DebugProtocol.NextResponse> {
+    if (this._isReadOnly) {
+      throw new Error('Read only target cannot step.');
+    }
+
     this._fireFakeContinued(args.threadId);
     return this.send('next', args);
   }
@@ -286,6 +435,10 @@ export default class VsDebugSession extends V8Protocol {
   stepIn(
     args: DebugProtocol.StepInArguments,
   ): Promise<DebugProtocol.StepInResponse> {
+    if (this._isReadOnly) {
+      throw new Error('Read only target cannot step.');
+    }
+
     this._fireFakeContinued(args.threadId);
     return this.send('stepIn', args);
   }
@@ -293,6 +446,10 @@ export default class VsDebugSession extends V8Protocol {
   stepOut(
     args: DebugProtocol.StepOutArguments,
   ): Promise<DebugProtocol.StepOutResponse> {
+    if (this._isReadOnly) {
+      throw new Error('Read only target cannot step.');
+    }
+
     this._fireFakeContinued(args.threadId);
     return this.send('stepOut', args);
   }
@@ -300,6 +457,10 @@ export default class VsDebugSession extends V8Protocol {
   continue(
     args: DebugProtocol.ContinueArguments,
   ): Promise<DebugProtocol.ContinueResponse> {
+    if (this._isReadOnly) {
+      throw new Error('Read only target cannot continue.');
+    }
+
     this._fireFakeContinued(args.threadId);
     return this.send('continue', args);
   }
@@ -307,19 +468,34 @@ export default class VsDebugSession extends V8Protocol {
   pause(
     args: DebugProtocol.PauseArguments,
   ): Promise<DebugProtocol.PauseResponse> {
+    if (this._isReadOnly) {
+      throw new Error('Read only target cannot pause.');
+    }
+
     return this.send('pause', args);
   }
 
   setVariable(
     args: DebugProtocol.SetVariableArguments,
   ): Promise<DebugProtocol.SetVariableResponse> {
-    return this.send('setVariable', args);
+    if (this._isReadOnly) {
+      throw new Error('Read only target cannot set variable.');
+    }
+
+    return this.send('setVariable', args).then(response => {
+      this._onDidEvaluate.next();
+      return response;
+    });
   }
 
   restartFrame(
     args: DebugProtocol.RestartFrameArguments,
     threadId: number,
   ): Promise<DebugProtocol.RestartFrameResponse> {
+    if (this._isReadOnly) {
+      throw new Error('Read only target cannot restart frame.');
+    }
+
     this._fireFakeContinued(threadId);
     return this.send('restartFrame', args);
   }
@@ -342,7 +518,15 @@ export default class VsDebugSession extends V8Protocol {
     if (this._adapterProcessSubscription != null && !this._disconnected) {
       // point of no return: from now on don't report any errors
       this._disconnected = true;
-      await this.send('disconnect', {restart});
+      await Observable.fromPromise(this.send('disconnect', {restart}))
+        .timeout(5000)
+        .catch(err => {
+          if (!(err instanceof TimeoutError)) {
+            throw err;
+          }
+          return Observable.empty();
+        })
+        .toPromise();
       this._stopServer();
     }
   }
@@ -381,6 +565,10 @@ export default class VsDebugSession extends V8Protocol {
     return this.send('exceptionInfo', args);
   }
 
+  info(args: DebugProtocol.InfoArguments): Promise<DebugProtocol.InfoResponse> {
+    return this.send('info', args);
+  }
+
   scopes(
     args: DebugProtocol.ScopesArguments,
   ): Promise<DebugProtocol.ScopesResponse> {
@@ -406,7 +594,12 @@ export default class VsDebugSession extends V8Protocol {
   evaluate(
     args: DebugProtocol.EvaluateArguments,
   ): Promise<DebugProtocol.EvaluateResponse> {
-    return this.send('evaluate', args);
+    return this.send('evaluate', args).then(result => {
+      if (args.context === 'repl') {
+        this._onDidEvaluate.next();
+      }
+      return result;
+    });
   }
 
   stepBack(
@@ -419,6 +612,10 @@ export default class VsDebugSession extends V8Protocol {
   reverseContinue(
     args: DebugProtocol.ReverseContinueArguments,
   ): Promise<DebugProtocol.ReverseContinueResponse> {
+    if (this._isReadOnly) {
+      throw new Error('Read only target cannot reverse continue.');
+    }
+
     this._fireFakeContinued(args.threadId);
     return this.send('reverseContinue', args);
   }
@@ -426,6 +623,10 @@ export default class VsDebugSession extends V8Protocol {
   nuclide_continueToLocation(
     args: DebugProtocol.nuclide_ContinueToLocationArguments,
   ): Promise<DebugProtocol.nuclide_ContinueToLocationResponse> {
+    if (this._isReadOnly) {
+      throw new Error('Read only target cannot run to location.');
+    }
+
     return this.custom('nuclide_continueToLocation', args);
   }
 
@@ -433,12 +634,26 @@ export default class VsDebugSession extends V8Protocol {
     return (new Date().getTime() - this._startTime) / 1000;
   }
 
-  dispatchRequest(
+  async dispatchRequest(
     request: DebugProtocol.Request,
     response: DebugProtocol.Response,
-  ): void {
+  ): Promise<void> {
     if (request.command === 'runInTerminal') {
-      this._logger.error('TODO: runInTerminal', request);
+      const runInTerminalHandler = this._runInTerminalHandler;
+      if (runInTerminalHandler == null) {
+        this._logger.error(
+          "'runInTerminal' isn't supported for this debug session",
+          request,
+        );
+        return;
+      }
+      try {
+        await runInTerminalHandler((request.arguments: any));
+      } catch (error) {
+        response.success = false;
+        response.message = error.message;
+      }
+      this.sendResponse(response);
     } else if (request.command === 'handshake') {
       this._logger.error('TODO: handshake', request);
     } else {
@@ -455,9 +670,9 @@ export default class VsDebugSession extends V8Protocol {
     const event: DebugProtocol.ContinuedEvent = {
       type: 'event',
       event: 'continued',
-      // $FlowFixMe
       body: {
         threadId,
+        // $FlowFixMe
         allThreadsContinued,
       },
       seq: 0,
@@ -470,32 +685,35 @@ export default class VsDebugSession extends V8Protocol {
     this._adapterProcessSubscription = this._spawner
       .spawnAdapter(this._adapterExecutable)
       .refCount()
-      .subscribe(
-        (message: ProcessMessage) => {
-          if (message.kind === 'stdout') {
-            this.handleData(new Buffer(message.data));
-          } else if (message.kind === 'stderr') {
-            const event: DebugProtocol.OutputEvent = ({
-              type: 'event',
-              event: 'output',
-              body: {
-                category: 'stderr',
-                output: message.data,
-              },
-              seq: 0,
-            }: any);
-            this._onDidOutput.next(event);
-            this._onDidEvent.next(event);
-            this._logger.error(`adapter stderr: ${message.data}`);
-          } else {
-            invariant(message.kind === 'exit');
+      .subscribe((message: ProcessMessage) => {
+        if (message.kind === 'stdout') {
+          this.handleData(new Buffer(message.data));
+        } else if (message.kind === 'stderr') {
+          const event: DebugProtocol.OutputEvent = ({
+            type: 'event',
+            event: 'output',
+            body: {
+              category: 'stderr',
+              output: message.data,
+            },
+            seq: 0,
+          }: any);
+          this._onDidOutput.next(event);
+          this._onDidEvent.next(event);
+          this._logger.error(`adapter stderr: ${message.data}`);
+          this._adapterErrorOutput = this._adapterErrorOutput + message.data;
+        } else {
+          invariant(message.kind === 'exit');
+          const exitCode = message.exitCode || 0;
+          if (exitCode === 0) {
             this.onServerExit(message.exitCode || 0);
+          } else {
+            this.onServerError(
+              new Error(`Debug adapter exited with code: ${exitCode}`),
+            );
           }
-        },
-        (err: Error) => {
-          this.onServerError(err);
-        },
-      );
+        }
+      });
 
     this.setOutput(this._spawner.write.bind(this._spawner));
   }
@@ -554,6 +772,12 @@ export default class VsDebugSession extends V8Protocol {
   }
 
   dispose(): void {
+    if (this._adapterErrorOutput) {
+      track('vs-debug-session:transaction', {
+        ...this._adapterAnalyticsExtras,
+        response: this._adapterErrorOutput,
+      });
+    }
     this.disconnect();
   }
 }

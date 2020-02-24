@@ -9,7 +9,7 @@
  * @format
  */
 
-import {isRunningInTest} from '../../commons-node/system-info';
+import {isRunningInTest} from 'nuclide-commons/system-info';
 
 import os from 'os';
 import {LOG_CATEGORY as PROCESS_LOG_CATEGORY} from 'nuclide-commons/process';
@@ -23,6 +23,10 @@ export const LOG_FILE_PATH = nuclideUri.join(LOG_DIRECTORY, 'nuclide.log');
 
 const MAX_LOG_SIZE = 1024 * 1024;
 const MAX_LOG_BACKUPS = 10;
+
+export function getPathToLogDir(): string {
+  return LOG_DIRECTORY;
+}
 
 export function getPathToLogFile(): string {
   return LOG_FILE_PATH;
@@ -57,6 +61,16 @@ export function getDefaultConfig(): log4js$Config {
       level: 'ALL',
       appender: {
         type: require.resolve('./nuclideConsoleAppender'),
+      },
+    });
+  } else {
+    // Make sure FATAL errors make it to stderr.
+    appenders.push({
+      type: 'logLevelFilter',
+      level: 'FATAL',
+      appender: {
+        type: require.resolve('./consoleAppender'),
+        stderr: true,
       },
     });
   }

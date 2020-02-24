@@ -6,40 +6,30 @@
  * LICENSE file in the root directory of this source tree. An additional grant
  * of patent rights can be found in the PATENTS file in the same directory.
  *
- * @flow
+ * @flow strict-local
  * @format
  */
 
-import * as DebugProtocol from 'vscode-debugprotocol';
 import type {Command} from './Command';
 import type {ConsoleIO} from './ConsoleIO';
 import type {DebuggerInterface} from './DebuggerInterface';
 
 import idx from 'idx';
-import Thread from './Thread';
+import TokenizedLine from './TokenizedLine';
 
 export default class BackTraceCommand implements Command {
-  name = 'backtrace';
-  helpText = '[frame] Displays the call stack of the active thread. With optional frame index, sets the current frame for variable display.';
+  name = 'where [num-frames]';
+  helpText = 'Displays the call stack of the active thread.';
   detailedHelpText = `
-backtrace [frame]
+where [num-frames]
 
-With no arguments, displays the call stack, showing the most recent stack frame
-first. For each frame, the frame's index, the source code file (if available), and
+Displays the call stack, showing the most recent stack frame first. For each
+frame, the frame's index, the source code file (if available), and
 line number are shown. An asterisk marks the currently selected frame.
 
-If the frame argument is specified, then it must be the index of a frame in the
-range displayed by 'backtrace'. Selecting a stack frame tells the debugger to consider
-the state of the program as if execution had stopped in that frame. Other commands
-which query program state will use the selected frame for context; for example:
-
-* The 'list' command, with no specified source file, will use the source file of
-  the selected frame.
-* The 'variables' command will display variables from the scope of the selected
-  frame.
-* The 'print' command will evaluate expression in terms of the variables that are
-  in scope in the selected frame.
-  `;
+If num-frames is specified, at most that many frames will be displayed. The
+default number of frames to display is 100.
+`;
 
   _console: ConsoleIO;
   _debugger: DebuggerInterface;
@@ -51,51 +41,34 @@ which query program state will use the selected frame for context; for example:
     this._debugger = debug;
   }
 
-  async execute(args: string[]): Promise<void> {
+  async execute(line: TokenizedLine): Promise<void> {
+    const args = line.stringTokens().slice(1);
     const activeThread = this._debugger.getActiveThread();
 
-    if (args.length > 1) {
-      throw Error(
-        "'backtrace' takes at most one argument -- the index of the frame to select",
+    const frameCount =
+      args.length < 1 ? BackTraceCommand._defaultFrames : parseInt(args[0], 10);
+    if (isNaN(frameCount) || frameCount <= 0) {
+      this._console.outputLine(
+        'The number of frames must be a positive integer.',
       );
-    }
-
-    const frameArg = args[0];
-    if (frameArg != null) {
-      await this._setSelectedStackFrame(activeThread, frameArg);
       return;
     }
 
     const frames = await this._debugger.getStackTrace(
       activeThread.id(),
-      BackTraceCommand._defaultFrames,
+      frameCount,
     );
-    this._printFrames(frames, activeThread.selectedStackFrame());
-  }
-
-  async _setSelectedStackFrame(
-    thread: Thread,
-    frameArg: string,
-  ): Promise<void> {
-    if (frameArg.match(/^\d+$/) == null) {
-      throw Error('Argument must be a numeric frame index.');
-    }
-
-    const newSelectedFrame = parseInt(frameArg, 10);
-    await this._debugger.setSelectedStackFrame(thread, newSelectedFrame);
-  }
-
-  _printFrames(
-    frames: DebugProtocol.StackFrame[],
-    selectedFrame: number,
-  ): void {
-    frames.forEach((frame, index) => {
-      const selectedMarker = index === selectedFrame ? '*' : ' ';
-      const path = idx(frame, _ => _.source.path) || null;
-      const location = path != null ? `${path}:${frame.line}` : '[no source]';
-      this._console.outputLine(
-        `${selectedMarker} #${index} ${frame.name} ${location}`,
-      );
-    });
+    const selectedFrame = activeThread.selectedStackFrame();
+    this._console.outputLine(
+      frames
+        .map((frame, index) => {
+          const selectedMarker = index === selectedFrame ? '*' : ' ';
+          const path = idx(frame, _ => _.source.path) || null;
+          const location =
+            path != null ? `${path}:${frame.line}` : '[no source]';
+          return `${selectedMarker} #${index} ${frame.name} ${location}`;
+        })
+        .join('\n'),
+    );
   }
 }

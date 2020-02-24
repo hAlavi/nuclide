@@ -15,12 +15,12 @@ import type {Observable, BehaviorSubject} from 'rxjs';
 import * as Immutable from 'immutable';
 import * as React from 'react';
 import HomeFeatureComponent from './HomeFeatureComponent';
-import NuclideLogo from './NuclideLogo';
 import createUtmUrl from './createUtmUrl';
 import featureConfig from 'nuclide-commons-atom/feature-config';
+import NuclideLogo from 'nuclide-commons-ui/NuclideLogo';
 import UniversalDisposable from 'nuclide-commons/UniversalDisposable';
 import {Checkbox} from 'nuclide-commons-ui/Checkbox';
-import {track} from '../../nuclide-analytics';
+import {track} from 'nuclide-analytics';
 
 export const WORKSPACE_VIEW_URI = 'atom://nuclide/home';
 
@@ -173,6 +173,7 @@ export default class HomePaneItem extends React.Component<
 
 function trackAnchorClicks(e: SyntheticMouseEvent<>) {
   const {target} = e;
+  // $FlowFixMe(>=0.68.0) Flow suppress (T27187857)
   if (target.tagName !== 'A' || target.href == null) {
     return;
   }

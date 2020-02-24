@@ -18,20 +18,7 @@ import {maybeToString} from 'nuclide-commons/string';
 import {microtask} from 'nuclide-commons/observable';
 import debounce from 'nuclide-commons/debounce';
 import UniversalDisposable from 'nuclide-commons/UniversalDisposable';
-
-type DefaultProps = {
-  disabled: boolean,
-  autofocus: boolean,
-  startSelected: boolean,
-  initialValue: string,
-  tabIndex: string,
-  onClick: (event: SyntheticMouseEvent<>) => mixed,
-  onDidChange: (text: string) => mixed,
-  onFocus: () => mixed,
-  onBlur: (blurEvent: Event) => mixed,
-  unstyled: boolean,
-  style: ?Object,
-};
+import atomTabIndexForwarder from './atomTabIndexForwarder';
 
 type Props = {
   className?: string,
@@ -46,6 +33,7 @@ type Props = {
   onFocus: () => mixed,
   onClick: (event: SyntheticMouseEvent<>) => mixed,
   onDidChange: (text: string) => mixed,
+  onDidChangeSelectionRange?: (event: atom$ChangeSelectionRangeEvent) => mixed,
   onConfirm?: (event?: atom$CustomEvent) => mixed,
   onCancel?: (event?: atom$CustomEvent) => mixed,
   onBlur: (blurEvent: Event) => mixed,
@@ -58,9 +46,9 @@ type Props = {
   style: ?Object,
 };
 
-type State = {
+type State = {|
   value: string,
-};
+|};
 
 const BLUR_FOCUS_DEBOUNCE_DELAY = 100;
 
@@ -73,26 +61,36 @@ export class AtomInput extends React.Component<Props, State> {
   _debouncedEditorBlur: (blurEvent: Event) => void;
   _debouncedEditorFocus: () => void;
   _isFocused: boolean;
+  _tabIndexForwarding: ?IDisposable;
 
-  static defaultProps: DefaultProps = {
+  static defaultProps = {
     disabled: false,
     autofocus: false,
     startSelected: false,
     initialValue: '',
     tabIndex: '0', // Default to all <AtomInput /> components being in tab order
-    onClick: event => {},
-    onDidChange: text => {},
+    onClick: () => {},
+    onDidChange: () => {},
     onFocus: () => {},
     onBlur: () => {},
     unstyled: false,
     style: null,
   };
 
+  static getDerivedStateFromProps(props: Props) {
+    const partialState = {};
+    if (props.value != null) {
+      partialState.value = props.value;
+    }
+
+    return partialState;
+  }
+
   constructor(props: Props) {
     super(props);
-    const value = props.value == null ? props.initialValue : props.value;
+
     this.state = {
-      value,
+      value: props.value ?? props.initialValue,
     };
     this._debouncedEditorFocus = debounce(
       this._onEditorFocus,
@@ -183,32 +181,39 @@ export class AtomInput extends React.Component<Props, State> {
         this.props.onDidChange.call(null, textEditor.getText());
       }),
     );
+    if (this.props.onDidChangeSelectionRange != null) {
+      disposables.add(
+        textEditor.onDidChangeSelectionRange(
+          this.props.onDidChangeSelectionRange,
+        ),
+      );
+    }
 
     this._updateWidth();
   }
 
-  componentWillReceiveProps(nextProps: Props): void {
-    if (nextProps.disabled !== this.props.disabled) {
-      this._updateDisabledState(nextProps.disabled);
-    }
-    const {value, placeholderText} = nextProps;
-    if (typeof value === 'string' && value !== this.props.value) {
-      // If the `value` prop is specified, then we must update the input area when there is new
-      // text, and this includes maintaining the correct cursor position.
-      this.setState({value});
-      const editor = this.getTextEditor();
-      const cursorPosition = editor.getCursorBufferPosition();
-      this.setText(value);
-      editor.setCursorBufferPosition(cursorPosition);
-    }
-
-    if (placeholderText !== this.props.placeholderText) {
-      this.getTextEditor().setPlaceholderText(placeholderText || '');
-    }
-  }
-
   componentDidUpdate(prevProps: Object, prevState: Object): void {
     this._updateWidth(prevProps.width);
+
+    if (prevProps.disabled !== this.props.disabled) {
+      this._updateDisabledState(this.props.disabled);
+    }
+
+    const newValue = this.props.value;
+    if (newValue != null && prevProps.value !== newValue) {
+      const editor = this.getTextEditor();
+      // Calling setText if the value did not change will redundantly call any
+      // onDidChange listeners with the same input.
+      if (editor.getText() !== newValue) {
+        const cursorPosition = editor.getCursorBufferPosition();
+        this.setText(newValue);
+        editor.setCursorBufferPosition(cursorPosition);
+      }
+    }
+
+    if (prevProps.placeholderText !== this.props.placeholderText) {
+      this.getTextEditor().setPlaceholderText(this.props.placeholderText || '');
+    }
   }
 
   componentWillUnmount(): void {
@@ -267,7 +272,7 @@ export class AtomInput extends React.Component<Props, State> {
       <atom-text-editor
         class={className}
         mini
-        ref={rootNode => (this._rootNode = rootNode)}
+        ref={this._textEditorRef}
         onClick={this.props.onClick}
         onFocus={this._debouncedEditorFocus}
         onBlur={this._debouncedEditorBlur}
@@ -275,6 +280,18 @@ export class AtomInput extends React.Component<Props, State> {
       />
     );
   }
+
+  _textEditorRef = (rootNode: ?HTMLElement): void => {
+    this._rootNode = rootNode;
+    if (rootNode == null) {
+      if (this._tabIndexForwarding != null) {
+        this._tabIndexForwarding.dispose();
+        this._tabIndexForwarding = null;
+      }
+    } else {
+      this._tabIndexForwarding = atomTabIndexForwarder(rootNode);
+    }
+  };
 
   getText(): string {
     return this.state.value;

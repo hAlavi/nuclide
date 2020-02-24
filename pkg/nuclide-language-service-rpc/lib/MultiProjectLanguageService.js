@@ -11,7 +11,7 @@
 
 import type {NuclideUri} from 'nuclide-commons/nuclideUri';
 import type {DeadlineRequest} from 'nuclide-commons/promise';
-import type {SearchStrategy} from '../../../modules/nuclide-commons/ConfigCache';
+import type {SearchStrategy} from 'nuclide-commons/ConfigCache';
 import type {AdditionalLogFile} from '../../nuclide-logging/lib/rpc-types';
 import type {FileVersion} from '../../nuclide-open-files-rpc/lib/rpc-types';
 import type {TextEdit} from 'nuclide-commons-atom/text-edit';
@@ -20,8 +20,10 @@ import type {CoverageResult} from '../../nuclide-type-coverage/lib/rpc-types';
 import type {
   DefinitionQueryResult,
   FindReferencesReturn,
+  RenameReturn,
   Outline,
   CodeAction,
+  SignatureHelp,
 } from 'atom-ide-ui';
 import type {
   AutocompleteRequest,
@@ -31,21 +33,25 @@ import type {
   FormatOptions,
   LanguageService,
   SymbolResult,
+  Completion,
+  CodeLensData,
+  StatusData,
 } from '../../nuclide-language-service/lib/LanguageService';
 import type {HostServices} from '../../nuclide-language-service-rpc/lib/rpc-types';
-import type {NuclideEvaluationExpression} from 'nuclide-debugger-common';
 import type {ConnectableObservable} from 'rxjs';
 
+import invariant from 'assert';
 import {timeoutAfterDeadline} from 'nuclide-commons/promise';
 import {stringifyError} from 'nuclide-commons/string';
-import {FileCache, ConfigObserver} from '../../nuclide-open-files-rpc';
+import {FileCache} from '../../nuclide-open-files-rpc';
 import {Cache} from 'nuclide-commons/cache';
 import {Observable} from 'rxjs';
 import UniversalDisposable from 'nuclide-commons/UniversalDisposable';
 import {compact} from 'nuclide-commons/observable';
 import {arrayCompact, arrayFlatten, collect} from 'nuclide-commons/collection';
 import {ConfigCache} from 'nuclide-commons/ConfigCache';
-import {ensureInvalidations, NullLanguageService} from '..';
+import {ensureInvalidations} from './ServerLanguageService';
+import {NullLanguageService} from './NullLanguageService';
 
 export class MultiProjectLanguageService<T: LanguageService = LanguageService> {
   // Maps project dir => LanguageService
@@ -53,13 +59,18 @@ export class MultiProjectLanguageService<T: LanguageService = LanguageService> {
   _resources: UniversalDisposable;
   _configCache: ConfigCache;
   _logger: log4js$Logger;
-  // A promise for when AtomLanguageService has called into this feature
+  // Promises for when AtomLanguageService has called into this feature
   _observeDiagnosticsPromise: Promise<void>;
   _observeDiagnosticsPromiseResolver: () => void;
+  _observeStatusPromise: Promise<void>;
+  _observeStatusPromiseResolver: () => void;
 
   constructor() {
     this._observeDiagnosticsPromise = new Promise((resolve, reject) => {
       this._observeDiagnosticsPromiseResolver = resolve;
+    });
+    this._observeStatusPromise = new Promise((resolve, reject) => {
+      this._observeStatusPromiseResolver = resolve;
     });
   }
 
@@ -89,18 +100,6 @@ export class MultiProjectLanguageService<T: LanguageService = LanguageService> {
 
     this._resources.add(host, this._processes);
 
-    // Observe projects as they are opened
-    const configObserver = new ConfigObserver(
-      fileCache,
-      fileExtensions,
-      filePath => this._configCache.getConfigDir(filePath),
-    );
-    this._resources.add(
-      configObserver,
-      configObserver.observeConfigs().subscribe(configs => {
-        this._ensureProcesses(configs);
-      }),
-    );
     this._resources.add(() => {
       this._closeProcesses();
     });
@@ -171,19 +170,6 @@ export class MultiProjectLanguageService<T: LanguageService = LanguageService> {
     return process;
   }
 
-  // Ensures that the only attached LanguageServices are those
-  // for the given configPaths.
-  // Closes all LanguageServices not in configPaths, and starts
-  // new LanguageServices for any paths in configPaths.
-  _ensureProcesses(configPaths: Set<NuclideUri>): void {
-    this._logger.info(
-      `MultiProjectLanguageService ensureProcesses. ${Array.from(
-        configPaths,
-      ).join(', ')}`,
-    );
-    this._processes.setKeys(configPaths);
-  }
-
   // Closes all LanguageServices for this fileCache.
   _closeProcesses(): void {
     this._logger.info(
@@ -237,6 +223,29 @@ export class MultiProjectLanguageService<T: LanguageService = LanguageService> {
       .publish();
   }
 
+  hasObservedStatus(): Promise<void> {
+    return this._observeStatusPromise;
+  }
+
+  observeStatus(fileVersion: FileVersion): ConnectableObservable<StatusData> {
+    this._observeStatusPromiseResolver();
+    return Observable.fromPromise(
+      this._getLanguageServiceForFile(fileVersion.filePath),
+    )
+      .flatMap(ls => ls.observeStatus(fileVersion).refCount())
+      .publish();
+  }
+
+  async clickStatus(
+    fileVersion: FileVersion,
+    id: string,
+    button: string,
+  ): Promise<void> {
+    return (await this._getLanguageServiceForFile(
+      fileVersion.filePath,
+    )).clickStatus(fileVersion, id, button);
+  }
+
   async getAutocompleteSuggestions(
     fileVersion: FileVersion,
     position: atom$Point,
@@ -245,6 +254,22 @@ export class MultiProjectLanguageService<T: LanguageService = LanguageService> {
     return (await this._getLanguageServiceForFile(
       fileVersion.filePath,
     )).getAutocompleteSuggestions(fileVersion, position, request);
+  }
+
+  async resolveAutocompleteSuggestion(
+    suggestion: Completion,
+  ): Promise<?Completion> {
+    invariant(
+      suggestion.remoteUri != null,
+      'remoteUri for autocomplete resolution should have been set by AutocompleteProvider.',
+    );
+
+    // We're running this "locally" (from RPC point of view), so strip remote
+    // URIs and just take the path.
+    const languageService = await this._getLanguageServiceForFile(
+      suggestion.remoteUri,
+    );
+    return languageService.resolveAutocompleteSuggestion(suggestion);
   }
 
   async getDefinition(
@@ -267,9 +292,30 @@ export class MultiProjectLanguageService<T: LanguageService = LanguageService> {
       .publish();
   }
 
+  rename(
+    fileVersion: FileVersion,
+    position: atom$Point,
+    newName: string,
+  ): ConnectableObservable<?RenameReturn> {
+    return Observable.fromPromise(
+      this._getLanguageServiceForFile(fileVersion.filePath),
+    )
+      .concatMap(ls => ls.rename(fileVersion, position, newName).refCount())
+      .publish();
+  }
+
   async getCoverage(filePath: NuclideUri): Promise<?CoverageResult> {
     return (await this._getLanguageServiceForFile(filePath)).getCoverage(
       filePath,
+    );
+  }
+
+  async onToggleCoverage(set: boolean): Promise<void> {
+    await Promise.all(
+      (await this.getAllLanguageServices()).map(async languageService => {
+        const ls = await languageService;
+        ls.onToggleCoverage(set);
+      }),
     );
   }
 
@@ -277,6 +323,22 @@ export class MultiProjectLanguageService<T: LanguageService = LanguageService> {
     return (await this._getLanguageServiceForFile(
       fileVersion.filePath,
     )).getOutline(fileVersion);
+  }
+
+  async getCodeLens(fileVersion: FileVersion): Promise<?Array<CodeLensData>> {
+    return (await this._getLanguageServiceForFile(
+      fileVersion.filePath,
+    )).getCodeLens(fileVersion);
+  }
+
+  async resolveCodeLens(
+    filePath: NuclideUri,
+    codeLens: CodeLensData,
+  ): Promise<?CodeLensData> {
+    return (await this._getLanguageServiceForFile(filePath)).resolveCodeLens(
+      filePath,
+      codeLens,
+    );
   }
 
   async getAdditionalLogFiles(
@@ -369,13 +431,13 @@ export class MultiProjectLanguageService<T: LanguageService = LanguageService> {
     )).formatAtPosition(fileVersion, position, triggerCharacter, options);
   }
 
-  async getEvaluationExpression(
+  async signatureHelp(
     fileVersion: FileVersion,
     position: atom$Point,
-  ): Promise<?NuclideEvaluationExpression> {
+  ): Promise<?SignatureHelp> {
     return (await this._getLanguageServiceForFile(
       fileVersion.filePath,
-    )).getEvaluationExpression(fileVersion, position);
+    )).signatureHelp(fileVersion, position);
   }
 
   async supportsSymbolSearch(directories: Array<NuclideUri>): Promise<boolean> {
@@ -441,6 +503,51 @@ export class MultiProjectLanguageService<T: LanguageService = LanguageService> {
       currentSelection,
       originalCursorPosition,
     );
+  }
+
+  onWillSave(fileVersion: FileVersion): ConnectableObservable<TextEdit> {
+    return Observable.fromPromise(
+      this._getLanguageServiceForFile(fileVersion.filePath),
+    )
+      .flatMap(languageService =>
+        languageService.onWillSave(fileVersion).refCount(),
+      )
+      .publish();
+  }
+
+  async sendLspRequest(
+    filePath: NuclideUri,
+    method: string,
+    params: mixed,
+  ): Promise<mixed> {
+    return (await this._getLanguageServiceForFile(filePath)).sendLspRequest(
+      filePath,
+      method,
+      params,
+    );
+  }
+
+  async sendLspNotification(method: string, params: mixed): Promise<void> {
+    const languageServices = await this.getAllLanguageServices();
+    languageServices.forEach(service =>
+      service.sendLspNotification(method, params),
+    );
+  }
+
+  observeLspNotifications(
+    notificationMethod: string,
+  ): ConnectableObservable<mixed> {
+    return this.observeLanguageServices()
+      .mergeMap((process: LanguageService) =>
+        process
+          .observeLspNotifications(notificationMethod)
+          .refCount()
+          .catch(error => {
+            this._logger.error('Error: observeLspNotifications', error);
+            return Observable.empty();
+          }),
+      )
+      .publish();
   }
 
   dispose(): void {

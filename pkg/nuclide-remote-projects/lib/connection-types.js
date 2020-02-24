@@ -5,11 +5,11 @@
  * This source code is licensed under the license found in the LICENSE file in
  * the root directory of this source tree.
  *
- * @flow
+ * @flow strict-local
  * @format
  */
 
-import type {SshHandshakeAuthMethodsType} from '../../nuclide-remote-connection/lib/SshHandshake';
+import type {SshHandshakeAuthMethodsType} from './ConnectionDetailsForm';
 
 export type NuclideRemoteConnectionParams = {
   username: string,

@@ -20,11 +20,16 @@
  * The resulting Observable fires and completes as soon as a matching file is found;
  * 'null' will always be emitted if no results are found.
  */
+import {findSubArrayIndex} from 'nuclide-commons/collection';
 import nuclideUri from 'nuclide-commons/nuclideUri';
-import {observeProcess} from 'nuclide-commons/process';
 import {Observable} from 'rxjs';
+import {track} from 'nuclide-analytics';
+import {codeSearch} from '../../../nuclide-code-search-rpc';
 import {isSourceFile} from '../utils';
 import escapeStringRegExp from 'escape-string-regexp';
+import {getLogger} from 'log4js';
+
+const logger = getLogger('nuclide-clang-rpc');
 
 const INCLUDE_SEARCH_TIMEOUT = 15000;
 
@@ -34,74 +39,77 @@ export function findIncludingSourceFile(
 ): Observable<?string> {
   return _findIncludingSourceFile(headerFile, projectRoot)
     .timeout(INCLUDE_SEARCH_TIMEOUT)
-    .catch(() => Observable.of(null));
+    .take(1)
+    .catch(e => {
+      track('nuclide-clang-rpc.source-to-header.grep-error', {
+        header: headerFile,
+        projectRoot,
+        error: e.toString(),
+      });
+      return Observable.of(null);
+    });
+}
+
+function getFBProjectRoots(): string[] {
+  try {
+    // $FlowFB
+    return require('./fb/project-roots').getFBProjectRoots();
+  } catch (e) {}
+  return [];
+}
+
+export function getSearchFolder(projectRoot: string, header: string): string {
+  const roots = getFBProjectRoots();
+  // if the projectRoot is a fb root, then search in the first subdirectory,
+  // using the whole root is too expensive and might timeout
+  if (roots.some(root => projectRoot.endsWith(root))) {
+    const headerParts = nuclideUri.split(header);
+    for (const root of roots) {
+      const rootParts = nuclideUri.split(root);
+      const offset = findSubArrayIndex(headerParts, rootParts);
+      if (offset !== -1) {
+        return nuclideUri.join(
+          ...headerParts.slice(0, offset + rootParts.length + 1),
+        );
+      }
+    }
+  }
+  return projectRoot;
 }
 
 function _findIncludingSourceFile(
-  headerFile: string,
+  header: string,
   projectRoot: string,
-): Observable<?string> {
-  const basename = escapeStringRegExp(nuclideUri.basename(headerFile));
+): Observable<string> {
+  const basename = escapeStringRegExp(nuclideUri.basename(header));
   const relativePath = escapeStringRegExp(
-    nuclideUri.relative(projectRoot, headerFile),
+    nuclideUri.relative(projectRoot, header),
   );
-  const pattern = `^\\s*#include\\s+["<](${relativePath}|(../)*${basename})[">]\\s*$`;
-  const regex = new RegExp(pattern);
+  const regex = new RegExp(
+    `^\\s*#include\\s+["<](${relativePath}|(../)*${basename})[">]\\s*$`,
+  );
+  const folder = getSearchFolder(projectRoot, header);
   // We need both the file and the match to verify relative includes.
   // Relative includes may not always be correct, so we may have to go through all the results.
-  return observeProcess(
-    'grep',
-    [
-      '-RE', // recursive, extended
-      '--null', // separate file/match with \0
-      pattern,
-      nuclideUri.dirname(headerFile),
-    ],
-    {/* TODO(T17353599) */ isExitError: () => false},
-  )
-    .catch(error => Observable.of({kind: 'error', error})) // TODO(T17463635)
-    .flatMap(message => {
-      switch (message.kind) {
-        case 'stdout':
-          const file = processGrepResult(message.data, headerFile, regex);
-          return file == null ? Observable.empty() : Observable.of(file);
-        case 'error':
-          throw new Error(String(message.error));
-        case 'exit':
-          return Observable.of(null);
-        default:
-          return Observable.empty();
+  return codeSearch(folder, regex, false, null, 200)
+    .refCount()
+    .filter(result => isSourceFile(result.file))
+    .flatMap(result => {
+      const match = regex.exec(result.line);
+      if (match == null) {
+        return Observable.empty();
       }
+      // Source-relative includes have to be verified.
+      // Relative paths will match the (../)* rule (at index 2).
+      if (match[2] != null) {
+        const includePath = nuclideUri.normalize(
+          nuclideUri.join(nuclideUri.dirname(result.file), match[1]),
+        );
+        if (includePath !== header) {
+          return Observable.empty();
+        }
+      }
+      return Observable.of(result.file);
     })
-    .take(1);
-}
-
-function processGrepResult(
-  result: string,
-  headerFile: string,
-  includeRegex: RegExp,
-): ?string {
-  const splitIndex = result.indexOf('\0');
-  if (splitIndex === -1) {
-    return null;
-  }
-  const filename = result.substr(0, splitIndex);
-  if (!isSourceFile(filename)) {
-    return null;
-  }
-  const match = includeRegex.exec(result.substr(splitIndex + 1));
-  if (match == null) {
-    return null;
-  }
-  // Source-relative includes have to be verified.
-  // Relative paths will match the (../)* rule (at index 2).
-  if (match[2] != null) {
-    const includePath = nuclideUri.normalize(
-      nuclideUri.join(nuclideUri.dirname(filename), match[1]),
-    );
-    if (includePath !== headerFile) {
-      return null;
-    }
-  }
-  return filename;
+    .do(file => logger.info('found source file by grepping', file));
 }

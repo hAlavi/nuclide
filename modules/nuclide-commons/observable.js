@@ -24,9 +24,14 @@
 //       .let(makeExciting())
 //       .subscribe(x => console.log(x));
 
+import type {AbortSignal} from './AbortController';
+
 import UniversalDisposable from './UniversalDisposable';
 import invariant from 'assert';
-import {Observable, ReplaySubject, Subject} from 'rxjs';
+// Note: DOMException is usable in Chrome but not in Node.
+import DOMException from 'domexception';
+import {Observable, ReplaySubject, Subject, Subscription} from 'rxjs';
+import AbortController from './AbortController';
 import {setDifference} from './collection';
 import debounce from './debounce';
 
@@ -285,50 +290,97 @@ export function concatLatest<T>(
     .map(accumulator => [].concat(...accumulator));
 }
 
-type ThrottleOptions = {
-  // Should the first element be emitted immeditately? Defaults to true.
+// Use a sentinel so we can distinguish between when `null` is emitted and when
+// nothing is.
+const NONE = {};
+
+type ThrottleOptions = {|
   leading?: boolean,
-};
+|};
 
-/**
- * A more sensible alternative to RxJS's throttle/audit/sample operators.
- */
 export function throttle<T>(
-  duration:
+  delay:
     | number
+    | ((value: T) => Observable<any> | Promise<any>)
     | Observable<any>
-    | ((value: T) => Observable<any> | Promise<any>),
-  options_: ?ThrottleOptions,
-): (Observable<T>) => Observable<T> {
-  return (source: Observable<T>) => {
-    const options = options_ || {};
-    const leading = options.leading !== false;
-    let audit;
-    switch (typeof duration) {
-      case 'number':
-        audit = obs => obs.auditTime(duration);
-        break;
-      case 'function':
-        audit = obs => obs.audit(duration);
-        break;
-      default:
-        audit = obs => obs.audit(() => duration);
-    }
+    | Promise<any>,
+  options?: ThrottleOptions = {leading: true},
+): (observable: Observable<T>) => Observable<T> {
+  let getDelay: (value: T) => Observable<any> | Promise<any>;
+  switch (typeof delay) {
+    case 'number':
+      getDelay = () => Observable.timer(delay);
+      break;
+    case 'function':
+      getDelay = delay;
+      break;
+    case 'object':
+      getDelay = () => delay;
+      break;
+    default:
+      throw new Error(`Invalid delay: ${delay}`);
+  }
 
-    if (!leading) {
-      return audit(source);
-    }
-
+  return function doThrottle(source: Observable<T>): Observable<T> {
     return Observable.create(observer => {
-      const connectableSource = source.publish();
-      const throttled = Observable.merge(
-        connectableSource.take(1),
-        audit(connectableSource.skip(1)),
+      const {leading = true} = options;
+      const timerStarts = new Subject();
+      let latestValue = NONE;
+      let latestValueIsLeading = false;
+      let shouldIgnore = false;
+
+      const checkShouldNext = () => {
+        if (!shouldIgnore && latestValue !== NONE) {
+          // At this point, latestValue must be of type T
+          latestValue = ((latestValue: any): T);
+
+          const valueToDispatch = latestValue;
+          shouldIgnore = true;
+
+          if (leading || !latestValueIsLeading) {
+            latestValue = NONE;
+            observer.next(valueToDispatch);
+          }
+          timerStarts.next(valueToDispatch);
+        }
+      };
+
+      const sub = new Subscription();
+      sub.add(
+        timerStarts
+          .switchMap(x => {
+            const timer = getDelay(x);
+            if (timer instanceof Observable) {
+              return timer.take(1);
+            } else {
+              return timer;
+            }
+          })
+          .subscribe(() => {
+            shouldIgnore = false;
+            latestValueIsLeading = false;
+            checkShouldNext();
+          }),
       );
-      return new UniversalDisposable(
-        throttled.subscribe(observer),
-        connectableSource.connect(),
+      sub.add(
+        source.subscribe({
+          next: x => {
+            latestValue = x;
+            latestValueIsLeading = true;
+            checkShouldNext();
+          },
+          error: err => {
+            observer.error(err);
+          },
+          complete: () => {
+            // Ensure we don't hold a reference to the last value.
+            latestValue = NONE;
+            observer.complete();
+          },
+        }),
       );
+
+      return sub;
     });
   };
 }
@@ -362,6 +414,20 @@ export function completingSwitchMap<T, U>(
       }
       return project(input, index);
     });
+}
+
+/**
+ * Returns a new observable consisting of the merged values from the passed
+ * observables and completes when the first inner observable completes.
+ */
+export function mergeUntilAnyComplete<T>(
+  ...observables: Array<Observable<T>>
+): Observable<T> {
+  const notifications = Observable.merge(
+    ...observables.map(o => o.materialize()),
+  );
+  // $FlowFixMe add dematerialize to rxjs Flow types
+  return notifications.dematerialize();
 }
 
 /**
@@ -421,66 +487,108 @@ export const nextAnimationFrame = Observable.create(observer => {
   };
 });
 
-export type CancellablePromise<T> = {
-  promise: Promise<T>,
-  cancel: () => void,
-};
-
 /**
- * Thrown when a CancellablePromise is cancelled().
+ * Creates an Observable around an abortable promise.
+ * Unsubscriptions are forwarded to the AbortController as an `abort()`.
+ * Example usage (with an abortable fetch):
+ *
+ *   fromPromise(signal => fetch(url, {...options, signal}))
+ *     .switchMap(....)
+ *
+ * Note that this can take a normal `() => Promise<T>` too
+ * (in which case this acts as just a plain `Observable.defer`).
  */
-export class PromiseCancelledError extends Error {
-  constructor() {
-    super();
-    this.name = 'PromiseCancelledError';
-  }
-}
-
-// Given an observable, convert to a Promise (thereby subscribing to the Observable)
-// and return back a cancellation function as well.
-// If the cancellation function is called before the returned promise resolves,
-// then unsubscribe from the underlying Promise and have the returned Promise throw.
-// If the cancellation function is called after the returned promise resolves,
-// then it does nothing.
-export function toCancellablePromise<T>(
-  observable: Observable<T>,
-): CancellablePromise<T> {
-  // Assign a dummy value to keep flow happy
-  let cancel: () => void = () => {};
-
-  const promise: Promise<T> = new Promise((resolve, reject) => {
-    // Stolen from Rx.js toPromise.js
-    let value;
-    const subscription = observable.subscribe(
-      v => {
-        value = v;
+export function fromAbortablePromise<T>(
+  func: (signal: AbortSignal) => Promise<T>,
+): Observable<T> {
+  return Observable.create(observer => {
+    let completed = false;
+    const abortController = new AbortController();
+    func(abortController.signal).then(
+      value => {
+        completed = true;
+        observer.next(value);
+        observer.complete();
       },
-      reject,
-      () => {
-        resolve(value);
+      error => {
+        completed = true;
+        observer.error(error);
       },
     );
-
-    // Attempt cancellation of both the subscription and the promise.
-    // Do not let one failure prevent the other from succeeding.
-    cancel = () => {
-      try {
-        subscription.unsubscribe();
-      } catch (e) {}
-      try {
-        reject(new PromiseCancelledError());
-      } catch (e) {}
+    return () => {
+      if (!completed) {
+        abortController.abort();
+        // If the promise adheres to the spec, it should throw.
+        // The error will be captured above but go into the void.
+      }
     };
   });
+}
 
-  return {promise, cancel};
+/**
+ * Converts an observable + AbortSignal into a cancellable Promise,
+ * which rejects with an AbortError DOMException on abort.
+ * Useful when writing the internals of a cancellable promise.
+ *
+ * Usage:
+ *
+ *   function abortableFunction(arg1: blah, options?: {signal?: AbortSignal}): Promise {
+ *     return toPromise(
+ *       observableFunction(arg1, options),
+ *       options && options.signal,
+ *     );
+ *   }
+ *
+ * Could eventually be replaced by Observable.first if
+ * https://github.com/whatwg/dom/issues/544 goes through.
+ *
+ * It's currently unclear if this should be usable with let/pipe:
+ * https://github.com/ReactiveX/rxjs/issues/3445
+ */
+export function toAbortablePromise<T>(
+  observable: Observable<T>,
+  signal?: ?AbortSignal,
+): Promise<T> {
+  if (signal == null) {
+    return observable.toPromise();
+  }
+  if (signal.aborted) {
+    return Promise.reject(DOMException('Aborted', 'AbortError'));
+  }
+  return observable
+    .race(
+      Observable.fromEvent(signal, 'abort').map(() => {
+        throw new DOMException('Aborted', 'AbortError');
+      }),
+    )
+    .toPromise();
+}
+
+/**
+ * When using Observables with AbortSignals, be sure to use this -
+ * it's really easy to miss the case when the signal is already aborted!
+ * Recommended to use this with let/pipe:
+ *
+ *   myObservable
+ *     .let(takeUntilAbort(signal))
+ */
+export function takeUntilAbort<T>(
+  signal: AbortSignal,
+): (Observable<T>) => Observable<T> {
+  return observable =>
+    Observable.defer(() => {
+      if (signal.aborted) {
+        return Observable.empty();
+      }
+      return observable.takeUntil(Observable.fromEvent(signal, 'abort'));
+    });
 }
 
 // Executes tasks. Ensures that at most one task is running at a time.
 // This class is handy for expensive tasks like processes, provided
 // you never want the result of a previous task after a new task has started.
 export class SingletonExecutor<T> {
-  _currentTask: ?CancellablePromise<T> = null;
+  _abortController: ?AbortController = null;
 
   // Executes(subscribes to) the task.
   // Will terminate(unsubscribe) to any previously executing task.
@@ -491,29 +599,29 @@ export class SingletonExecutor<T> {
     this.cancel();
 
     // Start a new process
-    const task = toCancellablePromise(createTask);
-    this._currentTask = task;
+    const controller = new AbortController();
+    this._abortController = controller;
 
-    // Wait for the process to complete or be cancelled ...
+    // Wait for the process to complete or be canceled ...
     try {
-      return await task.promise;
+      return await toAbortablePromise(createTask, controller.signal);
     } finally {
-      // ... and always clean up if we haven't been cancelled already.
-      if (task === this._currentTask) {
-        this._currentTask = null;
+      // ... and always clean up if we haven't been canceled already.
+      if (controller === this._abortController) {
+        this._abortController = null;
       }
     }
   }
 
   isExecuting(): boolean {
-    return this._currentTask != null;
+    return this._abortController != null;
   }
 
-  // Cancells any currently executing tasks.
+  // Cancels any currently executing tasks.
   cancel(): void {
-    if (this._currentTask != null) {
-      this._currentTask.cancel();
-      this._currentTask = null;
+    if (this._abortController != null) {
+      this._abortController.abort();
+      this._abortController = null;
     }
   }
 }
@@ -543,7 +651,7 @@ export function poll<T>(delay: number): (Observable<T>) => Observable<T> {
       const delays = new Subject();
       return delays
         .switchMap(n => Observable.timer(n))
-        .startWith(null)
+        .merge(Observable.of(null))
         .switchMap(() => {
           const subscribedAt = Date.now();
           return source.do({

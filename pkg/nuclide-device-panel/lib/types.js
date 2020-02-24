@@ -9,130 +9,25 @@
  * @format
  */
 
-import type {TaskEvent} from 'nuclide-commons/process';
 import type {NuclideUri} from 'nuclide-commons/nuclideUri';
-import type {Expected} from '../../commons-node/expected';
-import type {Device as DeviceIdType} from '../../nuclide-device-panel/lib/types';
+import type {Expected} from 'nuclide-commons/expected';
+import type {
+  Process,
+  Device,
+  AppInfoRow,
+  ProcessTask,
+  Task,
+  ComponentPosition,
+  DeviceTypeComponent,
+} from 'nuclide-debugger-common/types';
 
-import {DeviceTask} from './DeviceTask';
-import {Observable} from 'rxjs';
-
-//
-// Api
-//
-
-export type DevicePanelServiceApi = {
-  registerListProvider: (provider: DeviceListProvider) => IDisposable,
-  registerInfoProvider: (provider: DeviceInfoProvider) => IDisposable,
-  registerProcessesProvider: (provider: DeviceProcessesProvider) => IDisposable,
-  registerTaskProvider: (provider: DeviceTaskProvider) => IDisposable,
-  registerProcessTaskProvider: (
-    provider: DeviceProcessTaskProvider,
-  ) => IDisposable,
-  registerDeviceTypeTaskProvider: (
-    provider: DeviceTypeTaskProvider,
-  ) => IDisposable,
-  registerDeviceActionProvider: (provider: DeviceActionProvider) => IDisposable,
-  registerAppInfoProvider: (provider: DeviceAppInfoProvider) => IDisposable,
-  registerDeviceTypeComponentProvider: (
-    provider: DeviceTypeComponentProvider,
-  ) => IDisposable,
-};
-
-export interface DeviceListProvider {
-  observe(host: NuclideUri): Observable<Expected<Device[]>>;
-  getType(): string;
-}
-
-export interface DeviceInfoProvider {
-  fetch(
-    host: NuclideUri,
-    device: DeviceIdType,
-  ): Observable<Map<string, string>>;
-  getType(): string;
-  getTitle(): string;
-  getPriority(): number;
-  isSupported(host: NuclideUri): Observable<boolean>;
-}
-
-export interface DeviceProcessesProvider {
-  observe(host: NuclideUri, device: DeviceIdType): Observable<Process[]>;
-  getType(): string;
-}
-
-export interface DeviceTaskProvider {
-  getTask(host: NuclideUri, device: DeviceIdType): Observable<TaskEvent>;
-  getName(): string;
-  getType(): string;
-  isSupported(host: NuclideUri): Observable<boolean>;
-}
-
-export interface DeviceTypeTaskProvider {
-  getTask(host: NuclideUri): Observable<TaskEvent>;
-  getName(): string;
-  getType(): string;
-}
-
-export interface DeviceProcessTaskProvider {
-  run(host: NuclideUri, device: DeviceIdType, proc: Process): Promise<void>;
-  getTaskType(): ProcessTaskType;
-  getType(): string;
-  getSupportedPIDs(
-    host: NuclideUri,
-    device: DeviceIdType,
-    procs: Process[],
-  ): Observable<Set<number>>;
-  getName(): string;
-}
-
-export interface DeviceAppInfoProvider {
-  observe(host: NuclideUri, device: DeviceIdType): Observable<string>;
-  getName(): string;
-  getType(): string;
-  getProcessName(): string;
-  getAppName(): string;
-  canUpdate(): boolean;
-  update(value: string): Promise<void>;
-}
-
-export type DeviceAction = {
-  name: string,
-  callback: (device: Device) => void,
-};
-
-export interface DeviceActionProvider {
-  getActionsForDevice(device: Device): Array<DeviceAction>;
-}
-
-export type DevicesProps = {
-  devices: Expected<Array<Device>>,
-};
-
-export type DeviceTypeOrderedComponent = {
-  component: React$ComponentType<DevicesProps>,
-  order: number,
-};
-
-export interface DeviceTypeComponentProvider {
-  getType(): string;
-  getName(): string;
-  observe(
-    host: NuclideUri,
-    callback: (?DeviceTypeOrderedComponent) => void,
-  ): IDisposable;
-}
-
-// This is just a type internal to this package, it conveniently includes the React key
-export type DeviceTypeComponent = {
-  type: React$ComponentType<DevicesProps>,
-  key: string,
-};
+import * as Immutable from 'immutable';
 
 //
 // Store
 //
 
-export type AppState = {
+export type AppState = {|
   hosts: NuclideUri[],
   host: NuclideUri,
   devices: Expected<Device[]>,
@@ -143,56 +38,20 @@ export type AppState = {
   appInfoTables: Expected<Map<string, Array<AppInfoRow>>>,
   processes: Expected<Process[]>,
   processTasks: ProcessTask[],
-  deviceTasks: DeviceTask[],
+  deviceTasks: Map<string, Array<Task>>,
   isDeviceConnected: boolean,
-  deviceTypeTasks: DeviceTask[],
+  deviceTypeTasks: Array<Task>,
   isPollingDevices: boolean,
-  deviceTypeComponents: Array<DeviceTypeComponent>,
-};
-
-export type Store = {
-  getState(): AppState,
-  dispatch(action: Action): void,
-};
-
-//
-// Basic objects
-//
-
-export type DeviceArchitecture = 'x86' | 'x86_64' | 'arm' | 'arm64' | '';
-
-export type Device = {|
-  name: string,
-  port: number,
-  displayName: string,
-  architecture: DeviceArchitecture,
-  rawArchitecture: string,
-  ignoresSelection?: boolean,
+  deviceTypeComponents: Immutable.Map<
+    ComponentPosition,
+    Immutable.List<DeviceTypeComponent>,
+  >,
 |};
 
-export type Process = {
-  user: string,
-  pid: number,
-  name: string,
-  cpuUsage: ?number,
-  memUsage: ?number,
-  isJava: boolean,
-};
-
-export type ProcessTaskType = 'KILL' | 'DEBUG';
-
-export type ProcessTask = {
-  type: ProcessTaskType,
-  run: (proc: Process) => Promise<void>,
-  isSupported: (proc: Process) => boolean,
-  name: string,
-};
-
-export type AppInfoRow = {
-  appName: string,
-  name: string,
-  value: string,
-  isError?: boolean,
+export type Store = {
+  subscribe(() => void): () => void,
+  getState(): AppState,
+  dispatch(action: Action): void,
 };
 
 //
@@ -272,7 +131,7 @@ export type SetProcessTasksAction = {
 export type SetDeviceTasksAction = {
   type: 'SET_DEVICE_TASKS',
   payload: {
-    deviceTasks: DeviceTask[],
+    deviceTasks: Map<string, Array<Task>>,
   },
 };
 
@@ -293,14 +152,17 @@ export type ToggleProcessPollingAction = {
 export type SetDeviceTypeTasksAction = {
   type: 'SET_DEVICE_TYPE_TASKS',
   payload: {
-    deviceTypeTasks: DeviceTask[],
+    deviceTypeTasks: Array<Task>,
   },
 };
 
 export type SetDeviceTypeComponentsAction = {
   type: 'SET_DEVICE_TYPE_COMPONENTS',
   payload: {
-    components: Array<DeviceTypeComponent>,
+    components: Immutable.Map<
+      ComponentPosition,
+      Immutable.List<DeviceTypeComponent>,
+    >,
   },
 };
 

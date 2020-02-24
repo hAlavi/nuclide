@@ -26,9 +26,10 @@ import type {
   FindReferencesReturn,
   Outline,
   CodeAction,
+  SignatureHelp,
+  RenameReturn,
 } from 'atom-ide-ui';
 import type {ConnectableObservable} from 'rxjs';
-import type {NuclideEvaluationExpression} from 'nuclide-debugger-common';
 import type {SymbolResult} from '../../nuclide-quick-open/lib/types';
 
 export type {SymbolResult} from '../../nuclide-quick-open/lib/types';
@@ -48,6 +49,7 @@ export type Completion = {
   className?: ?string,
   iconHTML?: ?string,
   description?: ?string,
+  descriptionMarkdown?: ?string,
   descriptionMoreURL?: ?string,
   // These fields are extra:
   filterText?: string, // used by updateAutocompleteResults
@@ -58,6 +60,11 @@ export type Completion = {
   // The edits must not overlap and should contain the position of the completion request.
   // Note: this is implemented in AutocompletionProvider and is not part of Atom's API.
   textEdits?: Array<TextEdit>,
+
+  // Remote URI (or local path if the file is local) of the file in which we're
+  // requesting the autocomplete. This needs to be tracked inside the Completion
+  // in order to find the correct language server to send the resolve request to
+  remoteUri?: NuclideUri,
 };
 
 // This assertion ensures that Completion is a subtype of atom$AutocompleteSuggestion. If you are
@@ -92,6 +99,7 @@ export type AutocompleteRequest = {|
 
 // A (RPC-able) subset of DiagnosticMessage.
 export type FileDiagnosticMessage = {|
+  id?: ?string,
   kind?: DiagnosticMessageKind,
   providerName: string,
   type: DiagnosticMessageType,
@@ -103,17 +111,61 @@ export type FileDiagnosticMessage = {|
   fix?: DiagnosticFix,
   actions?: void, // Help Flow believe this is a subtype.
   stale?: boolean,
+  code?: number,
+  getBlockComponent?: any, // Help Flow believe this is a subtype.
 |};
 
 // Ensure that this is actually a subset.
 (((null: any): FileDiagnosticMessage): DiagnosticMessage);
 
+// A (RPC-able) subset of DiagnosticProviderUpdate.
+export type FileDiagnosticProviderUpdate = Map<
+  NuclideUri,
+  Array<FileDiagnosticMessage>,
+>;
+
 export type FileDiagnosticMap = Map<NuclideUri, Array<FileDiagnosticMessage>>;
+export type CodeLensData = {
+  range: atom$Range,
+  command?: {
+    title: string,
+    command: string,
+    arguments?: Array<any>,
+  },
+  data?: any,
+};
+
+// Messages in StatusData are interpreted as Markdown.
+export type StatusData =
+  | {|kind: 'null'|}
+  | {|kind: 'green', message?: string|}
+  | {|
+      kind: 'yellow',
+      message: string,
+      buttons: Array<string>,
+      id?: string,
+      shortMessage?: string,
+      progress?: {|numerator: number, denominator?: number|},
+    |}
+  | {|
+      kind: 'red',
+      id?: string,
+      message: string,
+      buttons: Array<string>,
+    |};
 
 export interface LanguageService {
   getDiagnostics(fileVersion: FileVersion): Promise<?FileDiagnosticMap>;
 
   observeDiagnostics(): ConnectableObservable<FileDiagnosticMap>;
+
+  observeStatus(fileVersion: FileVersion): ConnectableObservable<StatusData>;
+
+  clickStatus(
+    fileVersion: FileVersion,
+    id: string,
+    button: string,
+  ): Promise<void>;
 
   getAutocompleteSuggestions(
     fileVersion: FileVersion,
@@ -121,19 +173,37 @@ export interface LanguageService {
     request: AutocompleteRequest,
   ): Promise<?AutocompleteResult>;
 
+  resolveAutocompleteSuggestion(suggestion: Completion): Promise<?Completion>;
+
   getDefinition(
     fileVersion: FileVersion,
     position: atom$Point,
   ): Promise<?DefinitionQueryResult>;
 
+  // NOTE: Large `findReferences` and `rename` requests can take a long
+  //        time to resolve, which can eventually cause the RPC call to timeout.
+  //        To resolve this, we return Observables instead of Promises.
   findReferences(
     fileVersion: FileVersion,
     position: atom$Point,
   ): ConnectableObservable<?FindReferencesReturn>;
 
+  rename(
+    fileVersion: FileVersion,
+    position: atom$Point,
+    newName: string,
+  ): ConnectableObservable<?RenameReturn>;
+
   getCoverage(filePath: NuclideUri): Promise<?CoverageResult>;
 
   getOutline(fileVersion: FileVersion): Promise<?Outline>;
+
+  getCodeLens(fileVersion: FileVersion): Promise<?Array<CodeLensData>>;
+
+  resolveCodeLens(
+    filePath: NuclideUri,
+    codeLens: CodeLensData,
+  ): Promise<?CodeLensData>;
 
   /**
    * Requests CodeActions from a language service. This function can be called either
@@ -178,14 +248,16 @@ export interface LanguageService {
     options: FormatOptions,
   ): Promise<?Array<TextEdit>>;
 
+  signatureHelp(
+    fileVersion: FileVersion,
+    position: atom$Point,
+  ): Promise<?SignatureHelp>;
+
+  onToggleCoverage(on: boolean): Promise<void>;
+
   getAdditionalLogFiles(
     deadline: DeadlineRequest,
   ): Promise<Array<AdditionalLogFile>>;
-
-  getEvaluationExpression(
-    fileVersion: FileVersion,
-    position: atom$Point,
-  ): Promise<?NuclideEvaluationExpression>;
 
   supportsSymbolSearch(directories: Array<NuclideUri>): Promise<boolean>;
 
@@ -208,6 +280,20 @@ export interface LanguageService {
     currentSelection: atom$Range,
     originalCursorPosition: atom$Point,
   ): Promise<?atom$Range>;
+
+  onWillSave(fileVersion: FileVersion): ConnectableObservable<TextEdit>;
+
+  sendLspRequest(
+    filePath: NuclideUri,
+    method: string,
+    params: mixed,
+  ): Promise<mixed>;
+
+  sendLspNotification(method: string, params: mixed): Promise<void>;
+
+  observeLspNotifications(
+    notificationMethod: string,
+  ): ConnectableObservable<mixed>;
 
   dispose(): void;
 }

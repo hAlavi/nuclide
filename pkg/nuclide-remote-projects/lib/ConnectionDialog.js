@@ -5,7 +5,7 @@
  * This source code is licensed under the license found in the LICENSE file in
  * the root directory of this source tree.
  *
- * @flow
+ * @flow strict-local
  * @format
  */
 
@@ -14,37 +14,36 @@ import type {
   NuclideRemoteConnectionParamsWithPassword,
   NuclideRemoteConnectionProfile,
 } from './connection-types';
-import type {
-  SshHandshakeErrorType,
-  SshConnectionConfiguration,
-  SshConnectionDelegate,
-} from '../../nuclide-remote-connection/lib/SshHandshake';
+import type {SshConnectionConfiguration} from '../../nuclide-remote-connection/lib/SshHandshake';
+import type {HumanizedErrorMessage} from './notification';
 
-import {Observable} from 'rxjs';
-import passesGK from '../../commons-node/passesGK';
 import AuthenticationPrompt from './AuthenticationPrompt';
 import {Button, ButtonTypes} from 'nuclide-commons-ui/Button';
 import {ButtonGroup} from 'nuclide-commons-ui/ButtonGroup';
-import connectBigDigSshHandshake from './connectBigDigSshHandshake';
 import ConnectionDetailsPrompt from './ConnectionDetailsPrompt';
 import IndeterminateProgressBar from './IndeterminateProgressBar';
 import invariant from 'assert';
-import {notifySshHandshakeError} from './notification';
 import * as React from 'react';
 import electron from 'electron';
-import {
-  RemoteConnection,
-  SshHandshake,
-  decorateSshConnectionDelegateWithTracking,
-} from '../../nuclide-remote-connection';
 import {validateFormInputs} from './form-validation-utils';
-import {getLogger} from 'log4js';
 
-const logger = getLogger('nuclide-remote-projects');
 const {remote} = electron;
 invariant(remote != null);
 
-type Props = {
+type Props = {|
+  error: ?HumanizedErrorMessage,
+  dirty: boolean,
+  setDirty: boolean => void,
+
+  confirmConnectionPrompt: (answers: Array<string>) => void,
+  connectionPromptInstructions: string,
+
+  mode: ConnectionDialogMode,
+  setMode: ConnectionDialogMode => void,
+
+  connect: SshConnectionConfiguration => void,
+  cancelConnection: () => void,
+
   // The list of connection profiles that will be displayed.
   connectionProfiles: ?Array<NuclideRemoteConnectionProfile>,
   // If there is >= 1 connection profile, this index indicates the initial
@@ -57,99 +56,46 @@ type Props = {
   // ** while a profile is selected **.
   // The user's intent is to delete the currently-selected profile.
   onDeleteProfileClicked: (selectedProfileIndex: number) => mixed,
-  onConnect: (
-    connection: RemoteConnection,
-    config: SshConnectionConfiguration,
-  ) => mixed,
-  onError: (error: Error, config: SshConnectionConfiguration) => mixed,
-  onCancel: () => mixed,
-  onClosed: ?() => mixed,
   onSaveProfile: (
     index: number,
     profile: NuclideRemoteConnectionProfile,
   ) => mixed,
   onProfileSelected: (index: number) => mixed,
-};
+|};
 
-type State = {
-  finish: (answers: Array<string>) => mixed,
-  instructions: string,
-  isDirty: boolean,
-  mode: number,
+export opaque type ConnectionDialogMode = number;
+export const ConnectionDialogModes: {|
+  REQUEST_CONNECTION_DETAILS: ConnectionDialogMode,
+  WAITING_FOR_CONNECTION: ConnectionDialogMode,
+  REQUEST_AUTHENTICATION_DETAILS: ConnectionDialogMode,
+  WAITING_FOR_AUTHENTICATION: ConnectionDialogMode,
+|} = {
+  REQUEST_CONNECTION_DETAILS: 1,
+  WAITING_FOR_CONNECTION: 2,
+  REQUEST_AUTHENTICATION_DETAILS: 3,
+  WAITING_FOR_AUTHENTICATION: 4,
 };
-
-const REQUEST_CONNECTION_DETAILS = 1;
-const WAITING_FOR_CONNECTION = 2;
-const REQUEST_AUTHENTICATION_DETAILS = 3;
-const WAITING_FOR_AUTHENTICATION = 4;
 
 /**
  * Component that manages the state transitions as the user connects to a server.
  */
-export default class ConnectionDialog extends React.Component<Props, State> {
+export default class ConnectionDialog extends React.Component<Props> {
   _cancelButton: ?Button;
   _okButton: ?Button;
   _content: ?(AuthenticationPrompt | ConnectionDetailsPrompt);
-  _delegate: SshConnectionDelegate;
-  _pendingHandshake: ?rxjs$ISubscription;
-
-  constructor(props: Props) {
-    super(props);
-
-    this._delegate = decorateSshConnectionDelegateWithTracking({
-      onKeyboardInteractive: (
-        name,
-        instructions,
-        instructionsLang,
-        prompts,
-        finish,
-      ) => {
-        // TODO: Display all prompts, not just the first one.
-        this.requestAuthentication(prompts[0], finish);
-      },
-
-      onWillConnect: () => {},
-
-      onDidConnect: (
-        connection: RemoteConnection,
-        config: SshConnectionConfiguration,
-      ) => {
-        this.close(); // Close the dialog.
-        this.props.onConnect(connection, config);
-      },
-
-      onError: (
-        errorType: SshHandshakeErrorType,
-        error: Error,
-        config: SshConnectionConfiguration,
-      ) => {
-        this.close(); // Close the dialog.
-        notifySshHandshakeError(errorType, error, config);
-        this.props.onError(error, config);
-        logger.debug(error);
-      },
-    });
-
-    this.state = {
-      finish: answers => {},
-      instructions: '',
-      isDirty: false,
-      mode: REQUEST_CONNECTION_DETAILS,
-    };
-  }
 
   componentDidMount(): void {
     this._focus();
   }
 
-  componentDidUpdate(prevProps: Props, prevState: State) {
-    if (this.state.mode !== prevState.mode) {
+  componentDidUpdate(prevProps: Props) {
+    if (this.props.mode !== prevProps.mode) {
       this._focus();
     } else if (
-      this.state.mode === REQUEST_CONNECTION_DETAILS &&
+      this.props.mode === ConnectionDialogModes.REQUEST_CONNECTION_DETAILS &&
       this.props.selectedProfileIndex === prevProps.selectedProfileIndex &&
-      !this.state.isDirty &&
-      prevState.isDirty &&
+      !this.props.dirty &&
+      prevProps.dirty &&
       this._okButton != null
     ) {
       // When editing a profile and clicking "Save", the Save button disappears. Focus the primary
@@ -171,7 +117,7 @@ export default class ConnectionDialog extends React.Component<Props, State> {
   }
 
   _handleDidChange = (): void => {
-    this.setState({isDirty: true});
+    this.props.setDirty(true);
   };
 
   _handleClickSave = (): void => {
@@ -205,7 +151,7 @@ export default class ConnectionDialog extends React.Component<Props, State> {
     }
 
     this.props.onSaveProfile(this.props.selectedProfileIndex, newProfile);
-    this.setState({isDirty: false});
+    this.props.setDirty(false);
   };
 
   _validateInitialDirectory(path: string): boolean {
@@ -213,18 +159,19 @@ export default class ConnectionDialog extends React.Component<Props, State> {
   }
 
   render(): React.Node {
-    const mode = this.state.mode;
+    const mode = this.props.mode;
     let content;
     let isOkDisabled;
     let okButtonText;
 
-    if (mode === REQUEST_CONNECTION_DETAILS) {
+    if (mode === ConnectionDialogModes.REQUEST_CONNECTION_DETAILS) {
       content = (
         <ConnectionDetailsPrompt
+          error={this.props.error}
           connectionProfiles={this.props.connectionProfiles}
           selectedProfileIndex={this.props.selectedProfileIndex}
           onAddProfileClicked={this.props.onAddProfileClicked}
-          onCancel={this.cancel}
+          onCancel={this._cancel}
           onConfirm={this.ok}
           onDeleteProfileClicked={this.props.onDeleteProfileClicked}
           onDidChange={this._handleDidChange}
@@ -237,8 +184,8 @@ export default class ConnectionDialog extends React.Component<Props, State> {
       isOkDisabled = false;
       okButtonText = 'Connect';
     } else if (
-      mode === WAITING_FOR_CONNECTION ||
-      mode === WAITING_FOR_AUTHENTICATION
+      mode === ConnectionDialogModes.WAITING_FOR_CONNECTION ||
+      mode === ConnectionDialogModes.WAITING_FOR_AUTHENTICATION
     ) {
       content = <IndeterminateProgressBar />;
       isOkDisabled = true;
@@ -246,8 +193,8 @@ export default class ConnectionDialog extends React.Component<Props, State> {
     } else {
       content = (
         <AuthenticationPrompt
-          instructions={this.state.instructions}
-          onCancel={this.cancel}
+          instructions={this.props.connectionPromptInstructions}
+          onCancel={this._cancel}
           onConfirm={this.ok}
           ref={prompt => {
             this._content = prompt;
@@ -269,7 +216,7 @@ export default class ConnectionDialog extends React.Component<Props, State> {
       ];
     }
     if (
-      this.state.isDirty &&
+      this.props.dirty &&
       selectedProfile != null &&
       selectedProfile.saveable
     ) {
@@ -287,7 +234,7 @@ export default class ConnectionDialog extends React.Component<Props, State> {
           {saveButtonGroup}
           <ButtonGroup>
             <Button
-              onClick={this.cancel}
+              onClick={this._cancel}
               ref={button => {
                 this._cancelButton = button;
               }}>
@@ -308,40 +255,14 @@ export default class ConnectionDialog extends React.Component<Props, State> {
     );
   }
 
-  cancel = () => {
-    const mode = this.state.mode;
-
-    if (this._pendingHandshake != null) {
-      this._pendingHandshake.unsubscribe();
-      this._pendingHandshake = null;
-    }
-
-    if (mode === WAITING_FOR_CONNECTION) {
-      this.setState({
-        isDirty: false,
-        mode: REQUEST_CONNECTION_DETAILS,
-      });
-    } else {
-      this.props.onCancel();
-      this.close();
-    }
+  _cancel = () => {
+    this.props.cancelConnection();
   };
 
-  close() {
-    if (this._pendingHandshake != null) {
-      this._pendingHandshake.unsubscribe();
-      this._pendingHandshake = null;
-    }
-
-    if (this.props.onClosed) {
-      this.props.onClosed();
-    }
-  }
-
   ok = () => {
-    const {mode} = this.state;
+    const {mode} = this.props;
 
-    if (mode === REQUEST_CONNECTION_DETAILS) {
+    if (mode === ConnectionDialogModes.REQUEST_CONNECTION_DETAILS) {
       // User is trying to submit connection details.
       const connectionDetailsForm = this._content;
       invariant(connectionDetailsForm instanceof ConnectionDetailsPrompt);
@@ -366,11 +287,7 @@ export default class ConnectionDialog extends React.Component<Props, State> {
       }
 
       if (username && server && cwd && remoteServerCommand) {
-        this.setState({
-          isDirty: false,
-          mode: WAITING_FOR_CONNECTION,
-        });
-        this._pendingHandshake = this._connect({
+        this.props.connect({
           host: server,
           sshPort: parseInt(sshPort, 10),
           username,
@@ -379,7 +296,8 @@ export default class ConnectionDialog extends React.Component<Props, State> {
           cwd,
           remoteServerCommand,
           password,
-          displayTitle,
+          // Modified profiles probably don't match the display title.
+          displayTitle: this.props.dirty ? '' : displayTitle,
         });
       } else {
         remote.dialog.showErrorBox(
@@ -387,31 +305,16 @@ export default class ConnectionDialog extends React.Component<Props, State> {
           "Please make sure you've filled out all the form fields.",
         );
       }
-    } else if (mode === REQUEST_AUTHENTICATION_DETAILS) {
+    } else if (mode === ConnectionDialogModes.REQUEST_AUTHENTICATION_DETAILS) {
       const authenticationPrompt = this._content;
       invariant(authenticationPrompt instanceof AuthenticationPrompt);
       const password = authenticationPrompt.getPassword();
 
-      this.state.finish([password]);
-
-      this.setState({
-        isDirty: false,
-        mode: WAITING_FOR_AUTHENTICATION,
-      });
+      this.props.confirmConnectionPrompt([password]);
+      this.props.setDirty(false);
+      this.props.setMode(ConnectionDialogModes.WAITING_FOR_AUTHENTICATION);
     }
   };
-
-  requestAuthentication(
-    instructions: {echo: boolean, prompt: string},
-    finish: (answers: Array<string>) => void,
-  ) {
-    this.setState({
-      finish,
-      instructions: instructions.prompt,
-      isDirty: false,
-      mode: REQUEST_AUTHENTICATION_DETAILS,
-    });
-  }
 
   getFormFields(): ?NuclideRemoteConnectionParams {
     const connectionDetailsForm = this._content;
@@ -442,41 +345,7 @@ export default class ConnectionDialog extends React.Component<Props, State> {
   }
 
   onProfileClicked = (selectedProfileIndex: number): void => {
-    this.setState({isDirty: false});
+    this.props.setDirty(false);
     this.props.onProfileSelected(selectedProfileIndex);
   };
-
-  _connect(connectionConfig: SshConnectionConfiguration): rxjs$ISubscription {
-    return Observable.defer(() =>
-      Promise.all([
-        passesGK('nuclide_big_dig'),
-        RemoteConnection.reconnect(
-          connectionConfig.host,
-          connectionConfig.cwd,
-          connectionConfig.displayTitle,
-        ),
-      ]),
-    )
-      .switchMap(([useBigDig, existingConnection]) => {
-        if (existingConnection != null) {
-          this._delegate.onWillConnect(connectionConfig); // required for the API
-          this._delegate.onDidConnect(existingConnection, connectionConfig);
-          return Observable.empty();
-        }
-        let sshHandshake;
-        if (useBigDig) {
-          sshHandshake = connectBigDigSshHandshake(
-            connectionConfig,
-            this._delegate,
-          );
-        } else {
-          sshHandshake = new SshHandshake(this._delegate);
-          sshHandshake.connect(connectionConfig);
-        }
-        return Observable.create(() => {
-          return () => sshHandshake.cancel();
-        });
-      })
-      .subscribe();
-  }
 }

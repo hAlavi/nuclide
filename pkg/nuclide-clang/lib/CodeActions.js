@@ -5,13 +5,13 @@
  * This source code is licensed under the license found in the LICENSE file in
  * the root directory of this source tree.
  *
- * @flow
+ * @flow strict-local
  * @format
  */
 
 import type {CodeAction, DiagnosticMessage} from 'atom-ide-ui';
 
-import {DEFAULT_FLAGS_WARNING} from './constants';
+import {DEFAULT_FLAGS_WARNING, HEADER_DEFAULT_FLAGS_WARNING} from './constants';
 import {resetForSource} from './libclang';
 
 export default class CodeActions {
@@ -21,7 +21,10 @@ export default class CodeActions {
     diagnostics: Array<DiagnosticMessage>,
   ): Promise<Array<CodeAction>> {
     for (const diagnostic of diagnostics) {
-      if (diagnostic.text === DEFAULT_FLAGS_WARNING) {
+      if (
+        diagnostic.text === DEFAULT_FLAGS_WARNING ||
+        diagnostic.text === HEADER_DEFAULT_FLAGS_WARNING
+      ) {
         return Promise.resolve([
           {
             dispose() {},

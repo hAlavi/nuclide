@@ -13,7 +13,7 @@ import addTooltip from 'nuclide-commons-ui/addTooltip';
 import {AtomInput} from 'nuclide-commons-ui/AtomInput';
 import * as React from 'react';
 import classnames from 'classnames';
-import {track} from '../../../nuclide-analytics';
+import {track} from 'nuclide-analytics';
 import {AnalyticsActions} from '../constants';
 
 const MAX_ERROR_LINE_LENGTH = 80;
@@ -47,7 +47,7 @@ export class AppInfoValueCell extends React.PureComponent<Props, State> {
     };
   }
 
-  componentWillReceiveProps(nextProps: Props) {
+  UNSAFE_componentWillReceiveProps(nextProps: Props) {
     if (this.state.editingState === 'none') {
       this.setState({value: nextProps.data.value});
     }
@@ -86,6 +86,7 @@ export class AppInfoValueCell extends React.PureComponent<Props, State> {
     return (
       <span
         className="icon icon-alert"
+        // eslint-disable-next-line nuclide-internal/jsx-simple-callback-refs
         ref={addTooltip({
           title: this._prepareErrorMessage(error),
           delay: 0,

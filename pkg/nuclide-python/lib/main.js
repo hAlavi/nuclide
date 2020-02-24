@@ -12,12 +12,12 @@
 import type {LinterProvider, RegisterIndieLinter} from 'atom-ide-ui';
 import type {BuckTaskRunnerService} from '../../nuclide-buck/lib/types';
 import type {PlatformService} from '../../nuclide-buck/lib/PlatformService';
-import type {CwdApi} from '../../nuclide-current-working-directory/lib/CwdApi';
+import type CwdApi from '../../nuclide-current-working-directory/lib/CwdApi';
 import type {AtomLanguageServiceConfig} from '../../nuclide-language-service/lib/AtomLanguageService';
 import type {LanguageService} from '../../nuclide-language-service/lib/LanguageService';
 
+import passesGK from 'nuclide-commons/passesGK';
 import {GRAMMARS, GRAMMAR_SET} from './constants';
-import {getLintOnFly} from './config';
 import LinkTreeLinter from './LinkTreeLinter';
 import LintHelpers from './LintHelpers';
 import {
@@ -33,6 +33,7 @@ import {
 import createPackage from 'nuclide-commons-atom/createPackage';
 import {
   getShowGlobalVariables,
+  getShowSignatureHelp,
   getAutocompleteArguments,
   getIncludeOptionalArguments,
 } from './config';
@@ -53,55 +54,61 @@ async function connectionToPythonService(
   return languageService;
 }
 
-const atomConfig: AtomLanguageServiceConfig = {
-  name: 'Python',
-  grammars: GRAMMARS,
-  outline: {
-    version: '0.1.0',
-    priority: 1,
-    analyticsEventName: 'python.outline',
-  },
-  codeFormat: {
-    version: '0.1.0',
-    priority: 1,
-    analyticsEventName: 'python.formatCode',
-    canFormatRanges: false,
-    canFormatAtPosition: false,
-  },
-  findReferences: {
-    version: '0.1.0',
-    analyticsEventName: 'python.get-references',
-  },
-  autocomplete: {
-    inclusionPriority: 5,
-    suggestionPriority: 5, // Higher than the snippets provider.
-    disableForSelector: '.source.python .comment, .source.python .string',
-    excludeLowerPriority: false,
-    analytics: {
-      eventName: 'nuclide-python',
-      shouldLogInsertedSuggestion: false,
+function getAtomConfig(): AtomLanguageServiceConfig {
+  return {
+    name: 'Python',
+    grammars: GRAMMARS,
+    outline: {
+      version: '0.1.0',
+      priority: 1,
+      analyticsEventName: 'python.outline',
     },
-    autocompleteCacherConfig: {
-      updateResults: updateAutocompleteResults,
-      updateFirstResults: updateAutocompleteFirstResults,
+    codeFormat: {
+      version: '0.1.0',
+      priority: 1,
+      analyticsEventName: 'python.formatCode',
+      canFormatRanges: false,
+      canFormatAtPosition: false,
     },
-  },
-  definition: {
-    version: '0.1.0',
-    priority: 20,
-    definitionEventName: 'python.get-definition',
-  },
-  evaluationExpression: {
-    version: '0.0.0',
-    analyticsEventName: 'python.evaluationExpression',
-    matcher: {kind: 'default'},
-  },
-  typeHint: {
-    version: '0.0.0',
-    priority: 1,
-    analyticsEventName: 'python.hover',
-  },
-};
+    findReferences: {
+      version: '0.1.0',
+      analyticsEventName: 'python.get-references',
+    },
+    autocomplete: {
+      inclusionPriority: 5,
+      suggestionPriority: 5, // Higher than the snippets provider.
+      disableForSelector: '.source.python .comment, .source.python .string',
+      excludeLowerPriority: false,
+      analytics: {
+        eventName: 'nuclide-python',
+        shouldLogInsertedSuggestion: false,
+      },
+      autocompleteCacherConfig: {
+        updateResults: updateAutocompleteResults,
+        updateFirstResults: updateAutocompleteFirstResults,
+      },
+      supportsResolve: false,
+    },
+    definition: {
+      version: '0.1.0',
+      priority: 20,
+      definitionEventName: 'python.get-definition',
+    },
+    typeHint: {
+      version: '0.0.0',
+      priority: 5,
+      analyticsEventName: 'python.hover',
+    },
+    signatureHelp: getShowSignatureHelp()
+      ? {
+          version: '0.1.0',
+          priority: 1,
+          triggerCharacters: new Set(['(', ',']),
+          analyticsEventName: 'python.signatureHelp',
+        }
+      : undefined,
+  };
+}
 
 function resetServices(): void {
   getPythonServiceByConnection(null).reset();
@@ -111,19 +118,28 @@ function resetServices(): void {
 }
 
 class Activation {
-  _pythonLanguageService: AtomLanguageService<LanguageService>;
   _linkTreeLinter: LinkTreeLinter;
   _subscriptions: UniversalDisposable;
 
-  constructor(rawState: ?Object) {
-    this._pythonLanguageService = new AtomLanguageService(
-      connectionToPythonService,
-      atomConfig,
-    );
-    this._pythonLanguageService.activate();
+  constructor() {
+    this._subscriptions = new UniversalDisposable();
     this._linkTreeLinter = new LinkTreeLinter();
-    this._subscriptions = new UniversalDisposable(
-      this._pythonLanguageService,
+
+    this._initLanguageServer();
+  }
+
+  async _initLanguageServer(): Promise<void> {
+    if (await passesGK('nuclide_fb_pyls_vscode_ext')) {
+      return;
+    }
+    const pythonLanguageService = new AtomLanguageService(
+      connectionToPythonService,
+      getAtomConfig(),
+    );
+    pythonLanguageService.activate();
+    this._subscriptions.add(
+      this._provideLint(),
+      pythonLanguageService,
       atom.commands.add(
         'atom-workspace',
         'nuclide-python:reset-language-services',
@@ -132,14 +148,15 @@ class Activation {
     );
   }
 
-  provideLint(): LinterProvider {
-    return {
+  _provideLint(): IDisposable {
+    const lintProvier: LinterProvider = {
       grammarScopes: Array.from(GRAMMAR_SET),
       scope: 'file',
-      lintOnFly: getLintOnFly(),
       name: 'flake8',
       lint: editor => LintHelpers.lint(editor),
     };
+
+    return atom.packages.serviceHub.provide('linter', '1.0.0', lintProvier);
   }
 
   consumeLinterIndie(register: RegisterIndieLinter): IDisposable {

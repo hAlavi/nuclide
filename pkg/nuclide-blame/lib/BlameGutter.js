@@ -9,19 +9,20 @@
  * @format
  */
 
-import type {RevisionInfo} from '../../nuclide-hg-rpc/lib/HgService';
+import type {RevisionInfo} from '../../nuclide-hg-rpc/lib/types';
 import type {BlameForEditor, BlameProvider} from './types';
 
 import addTooltip from 'nuclide-commons-ui/addTooltip';
 import hideAllTooltips from '../../nuclide-ui/hide-all-tooltips';
-import {track, trackTiming} from '../../nuclide-analytics';
+import {track, trackTiming} from 'nuclide-analytics';
 import UniversalDisposable from 'nuclide-commons/UniversalDisposable';
 import {shell} from 'electron';
-// eslint-disable-next-line rulesdir/no-cross-atom-imports
-import {shortNameForAuthor} from '../../nuclide-vcs-log';
+import escapeHTML from 'escape-html';
 import * as React from 'react';
 import ReactDOM from 'react-dom';
 import classnames from 'classnames';
+// eslint-disable-next-line nuclide-internal/no-cross-atom-imports
+import {shortNameForAuthor} from '../../nuclide-vcs-log';
 
 const BLAME_DECORATION_CLASS = 'blame-decoration';
 
@@ -33,11 +34,13 @@ try {
   Avatar = null;
 }
 
-function escapeHTML(str: string): string {
-  return str
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
+let getEmployeeIdentifierFromAuthorString: string => string;
+try {
+  // $FlowFB
+  getEmployeeIdentifierFromAuthorString = require('fb-vcs-common')
+    .getEmployeeIdentifierFromAuthorString;
+} catch (err) {
+  getEmployeeIdentifierFromAuthorString = shortNameForAuthor;
 }
 
 function getHash(revision: ?RevisionInfo): ?string {
@@ -82,6 +85,7 @@ export default class BlameGutter {
     this._subscriptions.add(
       editor.onDidDestroy(() => {
         this._isEditorDestroyed = true;
+        this.destroy();
       }),
     );
     const editorView = atom.views.getView(editor);
@@ -330,12 +334,14 @@ class GutterElement extends React.Component<Props> {
     const opacity = 0.2 + 0.8 * alpha;
 
     if (isFirstLine) {
-      const unixname = shortNameForAuthor(revision.author);
+      const employeeIdentifier = getEmployeeIdentifierFromAuthorString(
+        revision.author,
+      );
       const tooltip = {
         title:
           escapeHTML(revision.title) +
           '<br />' +
-          escapeHTML(unixname) +
+          escapeHTML(employeeIdentifier) +
           ' &middot; ' +
           escapeHTML(revision.date.toDateString()),
         delay: 0,
@@ -345,14 +351,15 @@ class GutterElement extends React.Component<Props> {
       return (
         <div
           className="nuclide-blame-row nuclide-blame-content"
+          // eslint-disable-next-line nuclide-internal/jsx-simple-callback-refs
           ref={addTooltip(tooltip)}>
           {!isLastLine ? (
             <div className="nuclide-blame-vertical-bar nuclide-blame-vertical-bar-first" />
           ) : null}
           {Avatar ? (
-            <Avatar size={16} employeeIdentifier={unixname} />
+            <Avatar size={16} employeeIdentifier={employeeIdentifier} />
           ) : (
-            unixname + ': '
+            employeeIdentifier + ': '
           )}
           <span>{revision.title}</span>
           <div style={{opacity}} className="nuclide-blame-border-age" />

@@ -10,9 +10,10 @@
  * @format
  */
 
-import type {Source} from '../types';
+import type {Source, Severity} from '../types';
 import type {RegExpFilterChange} from 'nuclide-commons-ui/RegExpFilter';
 
+import {ButtonGroup} from 'nuclide-commons-ui/ButtonGroup';
 import {LoadingSpinner} from 'nuclide-commons-ui/LoadingSpinner';
 import * as React from 'react';
 import {ModalMultiSelect} from 'nuclide-commons-ui/ModalMultiSelect';
@@ -25,7 +26,7 @@ import addTooltip from 'nuclide-commons-ui/addTooltip';
 import {Button, ButtonSizes} from 'nuclide-commons-ui/Button';
 import invariant from 'assert';
 
-type Props = {
+type Props = {|
   clear: () => void,
   createPaste: ?() => Promise<void>,
   invalidFilterInput: boolean,
@@ -35,9 +36,19 @@ type Props = {
   sources: Array<Source>,
   onSelectedSourcesChange: (sourceIds: Array<string>) => void,
   filterText: string,
-};
+  selectedSeverities: Set<Severity>,
+  toggleSeverity: (severity: Severity) => void,
+|};
 
 export default class ConsoleHeader extends React.Component<Props> {
+  _filterComponent: ?RegExpFilter;
+
+  focusFilter = (): void => {
+    if (this._filterComponent != null) {
+      this._filterComponent.focus();
+    }
+  };
+
   _handleClearButtonClick = (event: SyntheticMouseEvent<>): void => {
     this.props.clear();
   };
@@ -116,17 +127,30 @@ export default class ConsoleHeader extends React.Component<Props> {
       .slice()
       .sort((a, b) => sortAlpha(a.name, b.name))
       .map(source => ({
-        label: source.id,
-        value: source.name,
+        label: source.name,
+        value: source.id,
       }));
 
-    const MultiSelectOption = this._renderOption;
+    const sourceButton =
+      options.length === 0 ? null : (
+        <ModalMultiSelect
+          labelComponent={MultiSelectLabel}
+          optionComponent={this._renderOption}
+          size={ButtonSizes.SMALL}
+          options={options}
+          value={this.props.selectedSourceIds}
+          onChange={this.props.onSelectedSourcesChange}
+          className="inline-block"
+        />
+      );
+
     const pasteButton =
       this.props.createPaste == null ? null : (
         <Button
           className="inline-block"
           size={ButtonSizes.SMALL}
           onClick={this._handleCreatePasteButtonClick}
+          // eslint-disable-next-line nuclide-internal/jsx-simple-callback-refs
           ref={addTooltip({
             title: 'Creates a Paste from the current contents of the console',
           })}>
@@ -137,16 +161,26 @@ export default class ConsoleHeader extends React.Component<Props> {
     return (
       <Toolbar location="top">
         <ToolbarLeft>
-          <ModalMultiSelect
-            labelComponent={MultiSelectLabel}
-            optionComponent={MultiSelectOption}
-            size={ButtonSizes.SMALL}
-            options={options}
-            value={this.props.selectedSourceIds}
-            onChange={this.props.onSelectedSourcesChange}
-            className="inline-block"
-          />
+          {sourceButton}
+          <ButtonGroup className="inline-block">
+            <FilterButton
+              severity="error"
+              selectedSeverities={this.props.selectedSeverities}
+              toggleSeverity={this.props.toggleSeverity}
+            />
+            <FilterButton
+              severity="warning"
+              selectedSeverities={this.props.selectedSeverities}
+              toggleSeverity={this.props.toggleSeverity}
+            />
+            <FilterButton
+              severity="info"
+              selectedSeverities={this.props.selectedSeverities}
+              toggleSeverity={this.props.toggleSeverity}
+            />
+          </ButtonGroup>
           <RegExpFilter
+            ref={component => (this._filterComponent = component)}
             value={{
               text: this.props.filterText,
               isRegExp: this.props.enableRegExpFilter,
@@ -190,4 +224,46 @@ function MultiSelectLabel(props: LabelProps): React.Element<any> {
       ? selectedOptions[0].label
       : `${selectedOptions.length} Sources`;
   return <span>Showing: {label}</span>;
+}
+
+type FilterButtonProps = {|
+  severity: 'error' | 'warning' | 'info',
+  selectedSeverities: Set<Severity>,
+  toggleSeverity: Severity => void,
+|};
+
+function FilterButton(props: FilterButtonProps): React.Element<any> {
+  const {severity} = props;
+  const selected = props.selectedSeverities.has(props.severity);
+  let tooltipTitle = selected ? 'Hide ' : 'Show ';
+  let icon;
+  switch (severity) {
+    case 'error':
+      tooltipTitle += 'Errors';
+      icon = 'nuclicon-error';
+      break;
+    case 'warning':
+      tooltipTitle += 'Warnings';
+      icon = 'nuclicon-warning';
+      break;
+    case 'info':
+      tooltipTitle += 'Info';
+      icon = 'info';
+      break;
+    default:
+      (severity: empty);
+      throw new Error(`Invalid severity: ${severity}`);
+  }
+
+  return (
+    <Button
+      icon={icon}
+      size={ButtonSizes.SMALL}
+      selected={props.selectedSeverities.has(severity)}
+      onClick={() => {
+        props.toggleSeverity(severity);
+      }}
+      tooltip={{title: tooltipTitle}}
+    />
+  );
 }

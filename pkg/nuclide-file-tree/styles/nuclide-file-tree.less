@@ -35,6 +35,11 @@
       content: '';
       position: absolute;
     }
+
+    .name {
+      // Give the text a little breathing room.
+      padding-right: @component-padding / 2;
+    }
   }
 
   .nuclide-ui-checkbox[type="checkbox"] {
@@ -67,6 +72,19 @@
       background: @button-background-color-selected;
     }
   }
+
+  .selection-indicator::before {
+    // We explicitly set the height on the selection indicator, so we want to
+    // make sure the pseudoelement (which gets the background color) takes up
+    // all of it.
+    height: 100% !important;
+  }
+
+  // Our selection indicators are behind the entries; we don't want to use the
+  // selected entries themselves (like the normal Atom tree-view does).
+  .entry.selected::before {
+    display: none !important;
+  }
 }
 
 // This is almost identical to the .nuclide-ui-panel-component-scroller, but without the
@@ -87,20 +105,6 @@
    * devtools "Timeline" tab) that occur frequently while typing.
    */
   isolation: isolate;
-}
-
-/**
- * A silly no-op style that forces custom scrollbars when scrollbars are set to "always show".
- * A Chromium bug prevents custom scrollbars from triggering a redraw if they load after render.
- * Themes are loaded *after* Nuclide has finished activating, so we're stuck with ugly scrollbars.
- * If we pre-emptively create a custom scrollbar, this mitigates the bug...
- * All major Atom themes use custom scrollbars in "always show" mode.. so this is fairly safe.
- *
- * Will likely be fixed when this patch lands in Electron (Committed on 2017/08/11)
- * https://bugs.chromium.org/p/chromium/issues/detail?id=454346
- */
-.scrollbars-visible-always .file-tree-scroller::-webkit-scrollbar {
-  display: block;
 }
 
 .nuclide-file-tree-filter {
@@ -194,7 +198,8 @@
 
 .nuclide-file-tree-open-files {
   display: flex;
-  max-height: 20vh;
+  height: 100%;
+  max-height: inherit;
 }
 
 .nuclide-file-tree-open-files-list {
@@ -228,9 +233,13 @@
   position: absolute;
 }
 
+.nuclide-file-tree-sidebar-uncommitted-changes-container {
+  height: 100%;
+  max-height: inherit;
+}
+
 .nuclide-file-tree-sidebar-uncommitted-changes {
   display: flex;
-  max-height: 20vh;
   width: 100%;
 }
 
@@ -242,10 +251,14 @@
   vertical-align: middle;
 }
 
-.nuclide-file-tree .list-item.generated-fully {
-  color: mix(@text-color, @tree-view-background-color, 33%);
+.nuclide-file-tree.tree-view .list-item.selected.selected {
+  padding-top: 0;
+  margin-top: 0;
 }
 
-.nuclide-file-tree .list-item.generated-partly {
-  color: mix(@text-color, @tree-view-background-color, 66%);
+// Override the One themes' negative margins which make the row too wide and
+// force the horizontal scrollbar always.
+// See https://github.com/atom/one-light-ui/blob/739a62d551183a464045bf08d9ca43dda3dc56c3/styles/config.less#L114
+.tree-view.tree-view.tree-view .project-root.project-root {
+  margin-right: 0;
 }

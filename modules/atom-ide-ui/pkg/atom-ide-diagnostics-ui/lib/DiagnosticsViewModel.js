@@ -16,8 +16,8 @@ import type {DiagnosticGroup, GlobalViewState} from './types';
 import type {DiagnosticMessage} from '../../atom-ide-diagnostics/lib/types';
 import type {RegExpFilterChange} from 'nuclide-commons-ui/RegExpFilter';
 
-import dockForLocation from 'nuclide-commons-atom/dock-for-location';
 import {goToLocation} from 'nuclide-commons-atom/go-to-location';
+import {showDockedPaneItem} from 'nuclide-commons-atom/pane-item';
 import memoizeUntilChanged from 'nuclide-commons/memoizeUntilChanged';
 import nuclideUri from 'nuclide-commons/nuclideUri';
 import observePaneItemVisibility from 'nuclide-commons-atom/observePaneItemVisibility';
@@ -25,7 +25,7 @@ import {arrayEqual, areSetsEqual} from 'nuclide-commons/collection';
 import {fastDebounce} from 'nuclide-commons/observable';
 import UniversalDisposable from 'nuclide-commons/UniversalDisposable';
 import React from 'react';
-import analytics from 'nuclide-commons-atom/analytics';
+import analytics from 'nuclide-commons/analytics';
 import Model from 'nuclide-commons/Model';
 import {renderReactRoot} from 'nuclide-commons-ui/renderReactRoot';
 import {bindObservableAsProps} from 'nuclide-commons-ui/bindObservableAsProps';
@@ -64,16 +64,24 @@ export class DiagnosticsViewModel {
     // Memoize `_filterDiagnostics()`
     (this: any)._filterDiagnostics = memoizeUntilChanged(
       this._filterDiagnostics,
-      (diagnostics, pattern, hiddenGroups, filterPath) => ({
+      (
         diagnostics,
         pattern,
         hiddenGroups,
+        filterByActiveTextEditor,
+        filterPath,
+      ) => ({
+        diagnostics,
+        pattern,
+        hiddenGroups,
+        filterByActiveTextEditor,
         filterPath,
       }),
       (a, b) =>
         patternsAreEqual(a.pattern, b.pattern) &&
         areSetsEqual(a.hiddenGroups, b.hiddenGroups) &&
         arrayEqual(a.diagnostics, b.diagnostics) &&
+        a.filterByActiveTextEditor === b.filterByActiveTextEditor &&
         a.filterPath === b.filterPath,
     );
 
@@ -93,6 +101,35 @@ export class DiagnosticsViewModel {
         .subscribe(() => {
           analytics.track('diagnostics-show-table');
         }),
+      atom.commands.add(
+        '.diagnostics-ui-table-container',
+        'diagnostics:copy',
+        () => {
+          if (window.getSelection().toString() === '') {
+            // if there is a selectedMessage and no selected text, copy
+            // selectedMessage.text to the clipboard
+            const currentMessageText = this._model.state.selectedMessage
+              ? this._model.state.selectedMessage.text
+              : null;
+            if (currentMessageText != null) {
+              atom.clipboard.write(currentMessageText);
+            }
+          } else {
+            document.execCommand('copy');
+          }
+        },
+      ),
+      atom.contextMenu.add({
+        '.diagnostics-ui-table-container .nuclide-ui-table-row-selected': [
+          {
+            command: 'diagnostics:copy',
+            label: 'Copy',
+            shouldDisplay() {
+              return window.getSelection().toString() !== '';
+            },
+          },
+        ],
+      }),
     );
 
     // Combine the state that's shared between instances, the state that's unique to this instance,
@@ -101,24 +138,30 @@ export class DiagnosticsViewModel {
       globalStates,
       this._model.toObservable(),
       visibility,
-      (globalState, instanceState, isVisible) => ({
-        ...globalState,
-        ...instanceState,
-        isVisible,
-        diagnostics: this._filterDiagnostics(
-          globalState.diagnostics,
-          instanceState.textFilter.pattern,
-          instanceState.hiddenGroups,
-          globalState.filterByActiveTextEditor
-            ? globalState.pathToActiveTextEditor
-            : null,
-        ),
-        onTypeFilterChange: this._handleTypeFilterChange,
-        onTextFilterChange: this._handleTextFilterChange,
-        selectMessage: this._selectMessage,
-        gotoMessageLocation: goToDiagnosticLocation,
-        supportedMessageKinds: globalState.supportedMessageKinds,
-      }),
+      (globalState, instanceState, isVisible) => {
+        const {
+          pathToActiveTextEditor,
+          ...globalStateWithoutPathToActiveTextEditor
+        } = globalState;
+
+        return {
+          ...globalStateWithoutPathToActiveTextEditor,
+          ...instanceState,
+          isVisible,
+          diagnostics: this._filterDiagnostics(
+            globalState.diagnostics,
+            instanceState.textFilter.pattern,
+            instanceState.hiddenGroups,
+            globalState.filterByActiveTextEditor,
+            pathToActiveTextEditor,
+          ),
+          onTypeFilterChange: this._handleTypeFilterChange,
+          onTextFilterChange: this._handleTextFilterChange,
+          selectMessage: this._selectMessage,
+          gotoMessageLocation: goToDiagnosticLocation,
+          supportedMessageKinds: globalState.supportedMessageKinds,
+        };
+      },
     );
 
     this._props = this._trackVisibility(props);
@@ -136,20 +179,10 @@ export class DiagnosticsViewModel {
           (a, b) => a.text === b.text,
         )
       ) {
-        const pane = atom.workspace.paneForItem(this);
         if (newProps.diagnostics.length > 0 && !newProps.isVisible) {
-          // We want to call workspace.open but it has no option to
-          // show the new pane without activating it.
-          // So instead we find the dock for the pane and show() it directly.
-          // https://github.com/atom/atom/issues/16007
-          if (pane != null) {
-            pane.activateItem(this);
-            const dock = dockForLocation(pane.getContainer().getLocation());
-            if (dock != null) {
-              dock.show();
-            }
-          }
+          showDockedPaneItem(this);
         } else if (newProps.diagnostics.length === 0 && newProps.isVisible) {
+          const pane = atom.workspace.paneForItem(this);
           // Only hide the diagnostics if it's the only item in its pane.
           if (pane != null) {
             const items = pane.getItems();
@@ -199,7 +232,7 @@ export class DiagnosticsViewModel {
   getElement(): HTMLElement {
     if (this._element == null) {
       const Component = bindObservableAsProps(this._props, DiagnosticsView);
-      const element = renderReactRoot(<Component />);
+      const element = renderReactRoot(<Component />, 'DiagnosticsRoot');
       element.classList.add('diagnostics-ui');
       this._element = element;
     }
@@ -219,6 +252,7 @@ export class DiagnosticsViewModel {
       nextHiddenTypes.add(type);
     }
     this._model.setState({hiddenGroups: nextHiddenTypes});
+    analytics.track('diagnostics-panel-change-filter');
   };
 
   _handleTextFilterChange = (value: RegExpFilterChange): void => {
@@ -228,19 +262,21 @@ export class DiagnosticsViewModel {
     this._model.setState({
       textFilter: {text, isRegExp, invalid, pattern},
     });
+    analytics.track('diagnostics-panel-change-filter');
   };
 
   _filterDiagnostics(
     diagnostics: Array<DiagnosticMessage>,
     pattern: ?RegExp,
     hiddenGroups: Set<DiagnosticGroup>,
+    filterByActiveTextEditor: boolean,
     filterByPath: ?string,
   ): Array<DiagnosticMessage> {
     return diagnostics.filter(message => {
       if (hiddenGroups.has(GroupUtils.getGroup(message))) {
         return false;
       }
-      if (filterByPath != null && message.filePath !== filterByPath) {
+      if (filterByActiveTextEditor && message.filePath !== filterByPath) {
         return false;
       }
       if (pattern == null) {
@@ -262,7 +298,7 @@ export class DiagnosticsViewModel {
 
 function goToDiagnosticLocation(
   message: DiagnosticMessage,
-  options: {|focusEditor: boolean|},
+  options: {|focusEditor: boolean, pendingPane: boolean|},
 ): void {
   // TODO: what should we do for project-path diagnostics?
   if (nuclideUri.endsWithSeparator(message.filePath)) {
@@ -280,7 +316,7 @@ function goToDiagnosticLocation(
     line,
     column,
     activatePane: options.focusEditor,
-    pending: true,
+    pending: options.pendingPane,
   });
 }
 

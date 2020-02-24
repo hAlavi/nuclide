@@ -5,7 +5,7 @@
  * This source code is licensed under the license found in the LICENSE file in
  * the root directory of this source tree.
  *
- * @flow
+ * @flow strict-local
  * @format
  */
 
@@ -37,6 +37,11 @@ async function createOCamlLanguageService(
     'DEBUG',
   );
 
+  let ocpindent = featureConfig.get('nuclide-ocaml.pathToOcpIndent');
+  if (typeof ocpindent !== 'string' || ocpindent === '') {
+    ocpindent = null;
+  }
+
   const lspService = await service.createMultiLspLanguageService(
     'ocaml',
     'ocaml-language-server',
@@ -46,37 +51,32 @@ async function createOCamlLanguageService(
       logLevel,
       fileNotifier,
       host,
-      projectFileNames: ['esy', 'esy.json', 'package.json', '.merlin'],
-      projectFileSearchStrategy: 'priority',
+      projectFileNames: [], // not needed for ocaml search strategy
+      projectFileSearchStrategy: 'ocaml',
       useOriginalEnvironment: true,
       fileExtensions: ['.ml', '.mli', '.re', '.rei'],
-      additionalLogFilesRetentionPeriod: 5 * 60 * 1000, // 5 minutes
+      additionalLogFilesRetentionPeriod: 15 * 60 * 1000, // 15 minutes
+      waitForDiagnostics: true,
+      waitForStatus: true,
+
+      // ocaml-language-server will use defaults for any settings that aren't
+      // given, so we only need to list non-defaults here.
       initializationOptions: {
         codelens: {
-          unicode: true,
-        },
-        debounce: {
-          linter: 10 * 1000, // 10s
+          // This doesn't actually change the encoding (Nuclide/Atom can handle
+          // unicode just fine), but instead just disables some single-character
+          // substitutions that make displayed code lenses not valid OCaml.
+          unicode: false,
         },
         format: {
           width: 80,
         },
-        diagnostics: {
-          merlinPerfLogging: true,
-          tools: ['merlin'],
-        },
-        path: {
-          ocamlfind: 'ocamlfind',
-          ocamlmerlin: 'ocamlmerlin',
-          opam: 'opam',
-          rebuild: 'rebuild',
-          refmt: 'refmt',
-          refmterr: 'refmterr',
-          rtop: 'rtop',
-        },
-        server: {
-          languages: ['ocaml', 'reason'],
-        },
+        path:
+          ocpindent == null
+            ? undefined
+            : {
+                ocpindent,
+              },
       },
     },
   );
@@ -84,6 +84,13 @@ async function createOCamlLanguageService(
 }
 
 export function createLanguageService(): AtomLanguageService<LanguageService> {
+  let aboutUrl = 'https://github.com/ocaml/merlin/wiki';
+  try {
+    // $FlowFB
+    const strings = require('./fb-ocaml-strings');
+    aboutUrl = strings.aboutUrl;
+  } catch (_) {}
+
   const atomConfig: AtomLanguageServiceConfig = {
     name: 'OCaml',
     grammars: ['source.ocaml', 'source.reason'],
@@ -113,6 +120,11 @@ export function createLanguageService(): AtomLanguageService<LanguageService> {
       version: '0.1.0',
       analyticsEventName: 'ocaml.findReferences',
     },
+    rename: {
+      version: '0.0.0',
+      priority: 1,
+      analyticsEventName: 'ocaml.rename',
+    },
     autocomplete: {
       inclusionPriority: 1,
       // OCaml completions are more relevant than snippets.
@@ -124,10 +136,20 @@ export function createLanguageService(): AtomLanguageService<LanguageService> {
         shouldLogInsertedSuggestion: false,
       },
       autocompleteCacherConfig: null,
+      supportsResolve: true,
     },
     diagnostics: {
       version: '0.2.0',
       analyticsEventName: 'ocaml.observeDiagnostics',
+    },
+    status: {
+      version: '0.1.0',
+      priority: 99,
+      observeEventName: 'ocaml.status.observe',
+      clickEventName: 'ocaml.status.click',
+      iconMarkdown:
+        '<div class="icon ocaml-icon" style="margin-left:5px;display:inline"/>',
+      description: `__Merlin__ provides errors, autocomplete, hyperclick, and outline from OCaml/reason. [Read more...](${aboutUrl})`,
     },
   };
 

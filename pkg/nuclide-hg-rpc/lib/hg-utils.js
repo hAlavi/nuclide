@@ -135,7 +135,14 @@ async function getHgExecParams(
   args_: Array<string>,
   options_: HgExecOptions,
 ): Promise<{command: string, args: Array<string>, options: Object}> {
-  let args = [...args_, '--noninteractive'];
+  let args = [
+    ...args_,
+    '--noninteractive',
+    // Prevent user-specified merge tools from attempting to
+    // open interactive editors.
+    '--config',
+    options_.useMerge3 === true ? 'ui.merge=:merge3' : 'ui.merge=:merge',
+  ];
   let sshCommand;
   // expandHomeDir is not supported on windows
   if (process.platform !== 'win32') {
@@ -160,10 +167,9 @@ async function getHgExecParams(
       // Without assuming hg is being run in a tty, the progress extension won't get used
       '--config',
       'progress.assume-tty=1',
-      // Prevent user-specified merge tools from attempting to
-      // open interactive editors.
+      // Never show progress bar in stdout since we use the progressfile
       '--config',
-      'ui.merge=:merge',
+      'progress.renderer=none',
       // Prevent scary error message on amend in the middle of a stack
       '--config',
       'fbamend.education=',
@@ -176,6 +182,7 @@ async function getHgExecParams(
   const options = {
     ...options_,
     env: {
+      LANG: 'en_US.utf-8', // make sure hg uses unicode if user hasn't set LANG themselves
       ...(await getOriginalEnvironment()),
       ATOM_BACKUP_EDITOR: 'false',
     },
@@ -183,6 +190,8 @@ async function getHgExecParams(
   if (!options.NO_HGPLAIN) {
     // Setting HGPLAIN=1 overrides any custom aliases a user has defined.
     options.env.HGPLAIN = 1;
+    // Make an exception for plain mode so the progress file gets written
+    options.env.HGPLAINEXCEPT = 'progress';
   }
   if (options.HGEDITOR != null) {
     options.env.HGEDITOR = options.HGEDITOR;
@@ -240,16 +249,4 @@ function getAtomRpcScriptPath(): string {
     }
   }
   return atomRpcEditorPath;
-}
-
-export function processExitCodeAndThrow(
-  processMessage: LegacyProcessMessage,
-): Observable<LegacyProcessMessage> {
-  // TODO(T17463635)
-  if (processMessage.kind === 'exit' && processMessage.exitCode !== 0) {
-    return Observable.throw(
-      new Error(`HG failed with exit code: ${String(processMessage.exitCode)}`),
-    );
-  }
-  return Observable.of(processMessage);
 }

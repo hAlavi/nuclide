@@ -6,7 +6,7 @@
  * LICENSE file in the root directory of this source tree. An additional grant
  * of patent rights can be found in the PATENTS file in the same directory.
  *
- * @flow
+ * @flow strict
  * @format
  */
 
@@ -19,7 +19,7 @@ import {getLogger} from 'log4js';
 import {Emitter} from 'event-kit';
 import {compress, decompress} from './compression';
 
-const logger = getLogger('nuclide-server');
+const logger = getLogger('reliable-socket');
 // Do not synchronously compress large payloads (risks blocking the event loop)
 const MAX_SYNC_COMPRESS_LENGTH = 100000;
 
@@ -60,50 +60,24 @@ export class WebSocketTransport {
       if (typeof data !== 'string') {
         message = decompress(data);
       }
-      this._onSocketMessage(message);
+      this._messages.next(message);
     });
 
     socket.on('close', () => {
-      if (this._socket != null) {
-        invariant(this._socket === socket);
-        logger.info(
-          'Client #%s socket close received on open socket!',
-          this.id,
-        );
-        this._setClosed();
-      } else {
-        logger.info(
-          'Client #%s received socket close on already closed socket!',
-          this.id,
-        );
-      }
+      invariant(this._socket === socket);
+      logger.info('Client #%s socket close received on open socket!', this.id);
+      this._setClosed();
     });
 
     socket.on('error', e => {
-      if (this._socket != null) {
-        logger.error(`Client #${this.id} error: ${e.message}`);
-        this._emitter.emit('error', e);
-      } else {
-        logger.error(`Client #${this.id} error after close: ${e.message}`);
-      }
+      logger.error(`Client #${this.id} error: ${e.message}`);
+      this._emitter.emit('error', e);
     });
 
     socket.on('pong', data => {
-      if (this._socket != null) {
-        // data may be a Uint8Array
-        this._emitter.emit('pong', data != null ? String(data) : data);
-      } else {
-        logger.warn('Received socket pong after connection closed');
-      }
+      // data may be a Uint8Array
+      this._emitter.emit('pong', data != null ? String(data) : data);
     });
-  }
-
-  _onSocketMessage(message: string): void {
-    if (this._socket == null) {
-      logger.warn('Received socket message after connection closed');
-      return;
-    }
-    this._messages.next(message);
   }
 
   onMessage(): Observable<string> {
@@ -149,7 +123,11 @@ export class WebSocketTransport {
   // The WS socket automatically responds to pings with pongs.
   ping(data: ?string): void {
     if (this._socket != null) {
-      this._socket.ping(data);
+      try {
+        this._socket.ping(data);
+      } catch (e) {
+        logger.error('Attempted to ping on the socket and got an error:', e);
+      }
     } else {
       logger.error('Attempted to send socket ping after connection closed');
     }
@@ -173,6 +151,7 @@ export class WebSocketTransport {
 
   _setClosed(): void {
     if (this._socket != null) {
+      this._socket.removeAllListeners();
       // In certain (Error) conditions socket.close may not emit the on close
       // event synchronously.
       this._socket = null;

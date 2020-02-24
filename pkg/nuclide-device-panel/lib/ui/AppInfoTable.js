@@ -5,15 +5,15 @@
  * This source code is licensed under the license found in the LICENSE file in
  * the root directory of this source tree.
  *
- * @flow
+ * @flow strict-local
  * @format
  */
 
-import type {AppInfoRow} from '../types';
+import type {AppInfoRow} from 'nuclide-debugger-common/types';
 
 import * as React from 'react';
 import {Table} from 'nuclide-commons-ui/Table';
-import {track} from '../../../nuclide-analytics';
+import {track} from 'nuclide-analytics';
 import {AnalyticsActions} from '../constants';
 import {AppInfoValueCell} from './AppInfoValueCell';
 

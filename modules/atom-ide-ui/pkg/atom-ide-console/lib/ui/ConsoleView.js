@@ -10,37 +10,31 @@
  * @format
  */
 
-import type {
-  DisplayableRecord,
-  Executor,
-  OutputProvider,
-  RecordHeightChangeHandler,
-  Source,
-  WatchEditorFunction,
-} from '../types';
+import type {Executor, Severity, Record, Source, SourceInfo} from '../types';
 import type {RegExpFilterChange} from 'nuclide-commons-ui/RegExpFilter';
 
+import {macrotask} from 'nuclide-commons/observable';
 import UniversalDisposable from 'nuclide-commons/UniversalDisposable';
-import debounce from 'nuclide-commons/debounce';
 import * as React from 'react';
 import {Observable} from 'rxjs';
-import FilteredMessagesReminder from './FilteredMessagesReminder';
+import FilterReminder from 'nuclide-commons-ui/FilterReminder';
 import OutputTable from './OutputTable';
 import ConsoleHeader from './ConsoleHeader';
 import InputArea from './InputArea';
 import PromptButton from './PromptButton';
 import NewMessagesNotification from './NewMessagesNotification';
 import invariant from 'assert';
+import nullthrows from 'nullthrows';
 import shallowEqual from 'shallowequal';
 import recordsChanged from '../recordsChanged';
 import StyleSheet from 'nuclide-commons-ui/StyleSheet';
 
-type Props = {
-  displayableRecords: Array<DisplayableRecord>,
+type Props = {|
+  records: Array<Record>,
   history: Array<string>,
   clearRecords: () => void,
   createPaste: ?() => Promise<void>,
-  watchEditor: ?WatchEditorFunction,
+  watchEditor: ?atom$AutocompleteWatchEditor,
   execute: (code: string) => void,
   currentExecutor: ?Executor,
   executors: Map<string, Executor>,
@@ -51,33 +45,40 @@ type Props = {
   selectSources: (sourceIds: Array<string>) => void,
   sources: Array<Source>,
   updateFilter: (change: RegExpFilterChange) => void,
-  getProvider: (id: string) => ?OutputProvider,
-  onDisplayableRecordHeightChange: RecordHeightChangeHandler,
+  getProvider: (id: string) => ?SourceInfo,
   filteredRecordCount: number,
   filterText: string,
   resetAllFilters: () => void,
   fontSize: number,
-};
+  selectedSeverities: Set<Severity>,
+  toggleSeverity: (severity: Severity) => void,
+|};
 
 type State = {
   unseenMessages: boolean,
+  scopeName: string,
 };
 
 // Maximum time (ms) for the console to try scrolling to the bottom.
 const MAXIMUM_SCROLLING_TIME = 3000;
+const DEFAULT_SCOPE_NAME = 'text.plain';
 
 let count = 0;
 
 export default class ConsoleView extends React.Component<Props, State> {
+  _consoleScrollPaneEl: ?HTMLDivElement;
+  _consoleHeaderComponent: ?ConsoleHeader;
   _disposables: UniversalDisposable;
+  _executorScopeDisposables: UniversalDisposable;
   _isScrolledNearBottom: boolean;
   _id: number;
+  _inputArea: ?InputArea;
 
   // Used when _scrollToBottom is called. The console optimizes message loading
   // so scrolling to the bottom once doesn't always scroll to the bottom since
   // more messages can be loaded after.
-  _isScrollingToBottom: boolean;
-  _scrollingThrottle: rxjs$Subscription;
+  _continuouslyScrollToBottom: boolean;
+  _scrollingThrottle: ?rxjs$Subscription;
 
   _outputTable: ?OutputTable;
 
@@ -85,28 +86,53 @@ export default class ConsoleView extends React.Component<Props, State> {
     super(props);
     this.state = {
       unseenMessages: false,
+      scopeName: DEFAULT_SCOPE_NAME,
     };
     this._disposables = new UniversalDisposable();
+    this._executorScopeDisposables = new UniversalDisposable();
     this._isScrolledNearBottom = true;
-    this._isScrollingToBottom = false;
-    (this: any)._handleScrollEnd = debounce(this._handleScrollEnd, 100);
+    this._continuouslyScrollToBottom = false;
     this._id = count++;
   }
 
   componentDidMount(): void {
-    // Wait for `<OutputTable />` to render itself via react-virtualized before scrolling and
-    // re-measuring; Otherwise, the scrolled location will be inaccurate, preventing the Console
-    // from auto-scrolling.
-    const immediate = setImmediate(() => {
-      this._startScrollToBottom();
-    });
-    this._disposables.add(() => {
-      clearImmediate(immediate);
-    });
+    this._disposables.add(
+      // Wait for `<OutputTable />` to render itself via react-virtualized before scrolling and
+      // re-measuring; Otherwise, the scrolled location will be inaccurate, preventing the Console
+      // from auto-scrolling.
+      macrotask.subscribe(() => {
+        this._startScrollToBottom();
+      }),
+      () => {
+        if (this._scrollingThrottle != null) {
+          this._scrollingThrottle.unsubscribe();
+        }
+      },
+      atom.commands.add('atom-workspace', {
+        // eslint-disable-next-line nuclide-internal/atom-apis
+        'atom-ide-console:focus-console-prompt': () => {
+          if (this._inputArea != null) {
+            this._inputArea.focus();
+          }
+        },
+      }),
+      atom.commands.add('atom-workspace', {
+        // eslint-disable-next-line nuclide-internal/atom-apis
+        'atom-ide-console:scroll-to-bottom': () => {
+          this._scrollToBottom();
+        },
+      }),
+      atom.commands.add(
+        nullthrows(this._consoleScrollPaneEl),
+        'atom-ide:filter',
+        () => this._focusFilter(),
+      ),
+    );
   }
 
   componentWillUnmount(): void {
     this._disposables.dispose();
+    this._executorScopeDisposables.dispose();
   }
 
   componentDidUpdate(prevProps: Props): void {
@@ -114,12 +140,15 @@ export default class ConsoleView extends React.Component<Props, State> {
     // automatically scroll.
     if (
       this._isScrolledNearBottom &&
-      recordsChanged(
-        prevProps.displayableRecords,
-        this.props.displayableRecords,
-      )
+      recordsChanged(prevProps.records, this.props.records)
     ) {
       this._startScrollToBottom();
+    }
+  }
+
+  _focusFilter(): void {
+    if (this._consoleHeaderComponent != null) {
+      this._consoleHeaderComponent.focusFilter();
     }
   }
 
@@ -148,21 +177,33 @@ export default class ConsoleView extends React.Component<Props, State> {
     return scrollHeight - (offsetHeight + scrollTop) < 5;
   }
 
-  componentWillReceiveProps(nextProps: Props): void {
+  UNSAFE_componentWillReceiveProps(nextProps: Props): void {
     // If the messages were cleared, hide the notification.
-    if (nextProps.displayableRecords.length === 0) {
+    if (nextProps.records.length === 0) {
       this._isScrolledNearBottom = true;
       this.setState({unseenMessages: false});
     } else if (
       // If we receive new messages after we've scrolled away from the bottom, show the "new
       // messages" notification.
       !this._isScrolledNearBottom &&
-      recordsChanged(
-        this.props.displayableRecords,
-        nextProps.displayableRecords,
-      )
+      recordsChanged(this.props.records, nextProps.records)
     ) {
       this.setState({unseenMessages: true});
+    }
+
+    this._executorScopeDisposables.dispose();
+    this._executorScopeDisposables = new UniversalDisposable();
+    for (const executor of nextProps.executors.values()) {
+      if (executor != null && executor.onDidChangeScopeName != null) {
+        this._executorScopeDisposables.add(
+          executor.onDidChangeScopeName(() => {
+            const scopeName = executor.scopeName();
+            this.setState({
+              scopeName,
+            });
+          }),
+        );
+      }
     }
   }
 
@@ -177,7 +218,7 @@ export default class ConsoleView extends React.Component<Props, State> {
     return this.props.executors.get(id);
   };
 
-  _getProvider = (id: string): ?OutputProvider => {
+  _getProvider = (id: string): ?SourceInfo => {
     return this.props.getProvider(id);
   };
 
@@ -199,10 +240,13 @@ export default class ConsoleView extends React.Component<Props, State> {
           invalidFilterInput={this.props.invalidFilterInput}
           enableRegExpFilter={this.props.enableRegExpFilter}
           filterText={this.props.filterText}
+          ref={component => (this._consoleHeaderComponent = component)}
           selectedSourceIds={this.props.selectedSourceIds}
           sources={this.props.sources}
           onFilterChange={this.props.updateFilter}
           onSelectedSourcesChange={this.props.selectSources}
+          selectedSeverities={this.props.selectedSeverities}
+          toggleSeverity={this.props.toggleSeverity}
         />
         {/*
           We need an extra wrapper element here in order to have the new messages notification stick
@@ -211,23 +255,24 @@ export default class ConsoleView extends React.Component<Props, State> {
           console-font-size is defined in main.js and updated via a user setting
         */}
         <div className="console-body" id={'console-font-size-' + this._id}>
-          <div className="console-scroll-pane-wrapper">
-            <FilteredMessagesReminder
+          <div
+            className="console-scroll-pane-wrapper atom-ide-filterable"
+            ref={el => (this._consoleScrollPaneEl = el)}>
+            <FilterReminder
+              noun="message"
+              nounPlural="messages"
               filteredRecordCount={this.props.filteredRecordCount}
               onReset={this.props.resetAllFilters}
             />
             <OutputTable
               // $FlowFixMe(>=0.53.0) Flow suppress
               ref={this._handleOutputTable}
-              displayableRecords={this.props.displayableRecords}
+              records={this.props.records}
               showSourceLabels={this.props.selectedSourceIds.length > 1}
               fontSize={this.props.fontSize}
               getExecutor={this._getExecutor}
               getProvider={this._getProvider}
               onScroll={this._handleScroll}
-              onDisplayableRecordHeightChange={
-                this.props.onDisplayableRecordHeightChange
-              }
               shouldScrollToBottom={this._shouldScrollToBottom}
             />
             <NewMessagesNotification
@@ -241,6 +286,21 @@ export default class ConsoleView extends React.Component<Props, State> {
     );
   }
 
+  _getMultiLineTip(): string {
+    const {currentExecutor} = this.props;
+    if (currentExecutor == null) {
+      return '';
+    }
+    const keyCombo =
+      process.platform === 'darwin'
+        ? // Option + Enter on Mac
+          '\u2325  + \u23CE'
+        : // Shift + Enter on Windows and Linux.
+          'Shift + Enter';
+
+    return `Tip: ${keyCombo} to insert a newline`;
+  }
+
   _renderPrompt(): ?React.Element<any> {
     const {currentExecutor} = this.props;
     if (currentExecutor == null) {
@@ -250,10 +310,13 @@ export default class ConsoleView extends React.Component<Props, State> {
       <div className="console-prompt">
         {this._renderPromptButton()}
         <InputArea
-          scopeName={currentExecutor.scopeName}
+          ref={(component: ?InputArea) => (this._inputArea = component)}
+          scopeName={this.state.scopeName}
+          fontSize={this.props.fontSize}
           onSubmit={this._executePrompt}
           history={this.props.history}
           watchEditor={this.props.watchEditor}
+          placeholderText={this._getMultiLineTip()}
         />
       </div>
     );
@@ -284,16 +347,14 @@ export default class ConsoleView extends React.Component<Props, State> {
       scrollTop,
     );
 
-    if (this._isScrollingToBottom && !isScrolledToBottom) {
-      this._scrollToBottom();
-    } else {
-      this._isScrolledNearBottom = isScrolledToBottom;
-      this._stopScrollToBottom();
-      this.setState({
-        unseenMessages:
-          this.state.unseenMessages && !this._isScrolledNearBottom,
-      });
-    }
+    this._isScrolledNearBottom = isScrolledToBottom;
+    this._stopScrollToBottom();
+    this.setState({
+      // TODO: (wbinnssmith) T30771435 this setState depends on current state
+      // and should use an updater function rather than an object
+      // eslint-disable-next-line react/no-access-state-in-setstate
+      unseenMessages: this.state.unseenMessages && !this._isScrolledNearBottom,
+    });
   }
 
   _handleOutputTable = (ref: OutputTable): void => {
@@ -311,13 +372,13 @@ export default class ConsoleView extends React.Component<Props, State> {
   };
 
   _startScrollToBottom = (): void => {
-    if (!this._isScrollingToBottom) {
-      this._isScrollingToBottom = true;
+    if (!this._continuouslyScrollToBottom) {
+      this._continuouslyScrollToBottom = true;
 
       this._scrollingThrottle = Observable.timer(
         MAXIMUM_SCROLLING_TIME,
       ).subscribe(() => {
-        this._isScrollingToBottom = false;
+        this._stopScrollToBottom();
       });
     }
 
@@ -325,11 +386,13 @@ export default class ConsoleView extends React.Component<Props, State> {
   };
 
   _stopScrollToBottom = (): void => {
-    this._isScrollingToBottom = false;
-    this._scrollingThrottle.unsubscribe();
+    this._continuouslyScrollToBottom = false;
+    if (this._scrollingThrottle != null) {
+      this._scrollingThrottle.unsubscribe();
+    }
   };
 
   _shouldScrollToBottom = (): boolean => {
-    return this._isScrolledNearBottom || this._isScrollingToBottom;
+    return this._isScrolledNearBottom || this._continuouslyScrollToBottom;
   };
 }

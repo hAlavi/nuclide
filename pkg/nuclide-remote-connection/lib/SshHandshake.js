@@ -23,7 +23,7 @@ import {shellQuote} from 'nuclide-commons/string';
 import lookupPreferIpv6 from './lookup-prefer-ip-v6';
 import {getLogger} from 'log4js';
 import {readFile as readRemoteFile} from './RemoteCommand';
-import {getNuclideVersion} from '../../commons-node/system-info';
+import {getNuclideVersion} from 'nuclide-commons/system-info';
 
 const logger = getLogger('nuclide-remote-connection');
 
@@ -51,6 +51,7 @@ const SupportedMethods = Object.freeze({
   SSL_AGENT: 'SSL_AGENT',
   PASSWORD: 'PASSWORD',
   PRIVATE_KEY: 'PRIVATE_KEY',
+  ROOTCANAL: 'ROOTCANAL',
 });
 
 export type SshHandshakeAuthMethodsType = $Values<typeof SupportedMethods>;
@@ -67,7 +68,7 @@ const ErrorType = Object.freeze({
   SERVER_START_FAILED: 'SERVER_START_FAILED',
   SERVER_CANNOT_CONNECT: 'SERVER_CANNOT_CONNECT',
   SFTP_TIMEOUT: 'SFTP_TIMEOUT',
-  USER_CANCELLED: 'USER_CANCELLED',
+  USER_CANCELED: 'USER_CANCELLED',
 });
 
 export type SshHandshakeErrorType =
@@ -157,10 +158,10 @@ export class SshHandshake {
   _clientCertificate: Buffer;
   _clientKey: Buffer;
   _passwordRetryCount: number;
-  _cancelled: boolean;
+  _canceled: boolean;
 
   constructor(delegate: SshConnectionDelegate, connection?: SshConnection) {
-    this._cancelled = false;
+    this._canceled = false;
     this._delegate = delegate;
     this._connection = connection ? connection : new SshConnection();
     this._connection.on('ready', this._onConnect.bind(this));
@@ -231,7 +232,7 @@ export class SshHandshake {
   async connect(config: SshConnectionConfiguration): Promise<void> {
     this._config = config;
     this._passwordRetryCount = 0;
-    this._cancelled = false;
+    this._canceled = false;
     this._willConnect();
 
     let lookup;
@@ -302,7 +303,7 @@ export class SshHandshake {
   }
 
   cancel() {
-    this._cancelled = true;
+    this._canceled = true;
     this._connection.end();
   }
 
@@ -342,9 +343,11 @@ export class SshHandshake {
   }
 
   _updateServerInfo(serverInfo: {}) {
+    // $FlowFixMe(>=0.68.0) Flow suppress (T27187857)
     invariant(typeof serverInfo.port === 'number');
     this._remotePort = serverInfo.port || 0;
     this._remoteHost =
+      // $FlowFixMe(>=0.68.0) Flow suppress (T27187857)
       typeof serverInfo.hostname === 'string'
         ? serverInfo.hostname
         : this._config.host;
@@ -352,6 +355,7 @@ export class SshHandshake {
     // Because the value for the Initial Directory that the user supplied may have
     // been a symlink that was resolved by the server, overwrite the original `cwd`
     // value with the resolved value.
+    // $FlowFixMe(>=0.68.0) Flow suppress (T27187857)
     invariant(typeof serverInfo.workspace === 'string');
     this._config.cwd = serverInfo.workspace;
 
@@ -360,12 +364,15 @@ export class SshHandshake {
     // Do not throw when any of them (`ca`, `cert`, or `key`) are undefined because that will be the
     // case when the server is started in "insecure" mode. See `::_isSecure`, which returns the
     // security of this connection after the server is started.
+    // $FlowFixMe(>=0.68.0) Flow suppress (T27187857)
     if (typeof serverInfo.ca === 'string') {
       this._certificateAuthorityCertificate = new Buffer(serverInfo.ca);
     }
+    // $FlowFixMe(>=0.68.0) Flow suppress (T27187857)
     if (typeof serverInfo.cert === 'string') {
       this._clientCertificate = new Buffer(serverInfo.cert);
     }
+    // $FlowFixMe(>=0.68.0) Flow suppress (T27187857)
     if (typeof serverInfo.key === 'string') {
       this._clientKey = new Buffer(serverInfo.key);
     }
@@ -407,10 +414,10 @@ export class SshHandshake {
         stream
           .on('close', async (exitCode, signal) => {
             if (exitCode !== 0) {
-              if (this._cancelled) {
+              if (this._canceled) {
                 this._error(
                   'Cancelled by user',
-                  SshHandshake.ErrorType.USER_CANCELLED,
+                  SshHandshake.ErrorType.USER_CANCELED,
                   new Error(stdOut),
                 );
               } else {
@@ -508,7 +515,7 @@ export class SshHandshake {
   }
 
   async _onConnect(): Promise<void> {
-    if (!await this._startRemoteServer()) {
+    if (!(await this._startRemoteServer())) {
       return;
     }
 
@@ -542,7 +549,7 @@ export class SshHandshake {
         host: this._remoteHost,
         port: this._remotePort,
         family: this._config.family,
-        cwd: this._config.cwd,
+        path: this._config.cwd,
         certificateAuthorityCertificate: this._certificateAuthorityCertificate,
         clientCertificate: this._clientCertificate,
         clientKey: this._clientKey,
@@ -562,7 +569,7 @@ export class SshHandshake {
             host: 'localhost',
             port: localPort,
             family: this._config.family,
-            cwd: this._config.cwd,
+            path: this._config.cwd,
             displayTitle: this._config.displayTitle,
           });
         });
@@ -624,8 +631,9 @@ export function decorateSshConnectionDelegateWithTracking(
       error: Error,
       config: SshConnectionConfiguration,
     ) => {
-      invariant(connectionTracker);
-      connectionTracker.trackFailure(errorType, error);
+      if (connectionTracker != null) {
+        connectionTracker.trackFailure(errorType, error);
+      }
       delegate.onError(errorType, error, config);
     },
   };

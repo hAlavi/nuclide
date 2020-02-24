@@ -9,15 +9,16 @@
  * @format
  */
 
-import type {Store} from '../types';
+import type {AppState, Store} from '../types';
 import type {Props} from './TunnelsPanelContents';
 
 import {bindObservableAsProps} from 'nuclide-commons-ui/bindObservableAsProps';
-import nuclideUri from 'nuclide-commons/nuclideUri';
+import {createObservableForTunnel} from '../CreateObservables';
 import * as Actions from '../redux/Actions';
 import {Observable} from 'rxjs';
 import {TunnelsPanelContents} from './TunnelsPanelContents';
 import {renderReactRoot} from 'nuclide-commons-ui/renderReactRoot';
+import observableFromReduxStore from 'nuclide-commons/observableFromReduxStore';
 import * as React from 'react';
 
 export const WORKSPACE_VIEW_URI = 'atom://nuclide/ssh-tunnels';
@@ -30,7 +31,7 @@ export class TunnelsPanel {
   }
 
   getTitle() {
-    return 'SSH tunnels';
+    return 'Nuclide tunnels';
   }
 
   getIconName() {
@@ -50,44 +51,32 @@ export class TunnelsPanel {
   }
 
   getElement(): HTMLElement {
-    // $FlowFixMe: We need to teach Flow about Symbol.observable
-    const states = Observable.from(this._store);
+    const states: Observable<AppState> = observableFromReduxStore(this._store);
 
-    const props: Observable<Props> = states.map(state => {
-      let workingDirectoryHost;
-      if (state.currentWorkingDirectory == null) {
-        workingDirectoryHost = null;
-      } else {
-        const path = state.currentWorkingDirectory.getPath();
-        if (nuclideUri.isLocal(path)) {
-          workingDirectoryHost = 'localhost';
-        } else {
-          workingDirectoryHost = nuclideUri.getHostname(path);
-        }
-      }
+    const props: Observable<Props> = states.map((state: AppState) => {
       return {
-        tunnels: Array.from(state.openTunnels.entries()),
+        tunnels: state.tunnels.toList(),
         openTunnel: tunnel => {
-          if (this._store.getState().status === 'opening') {
-            return;
-          }
-          this._store.dispatch(
-            Actions.openTunnel(
-              tunnel,
-              // onOpen
-              error => {
-                if (error != null) {
-                  atom.notifications.addError(error.message);
+          let noMoreNotifications = false;
+          // eslint-disable-next-line nuclide-internal/unused-subscription
+          createObservableForTunnel(tunnel, this._store)
+            .do(() => (noMoreNotifications = true))
+            .subscribe({
+              error: e => {
+                if (!noMoreNotifications) {
+                  atom.notifications.addError('Failed to open tunnel', {
+                    detail: e.code,
+                    dismissable: true,
+                  });
                 }
               },
-              // onClose
-              () => {},
-            ),
-          );
+            });
         },
         closeTunnel: tunnel =>
-          this._store.dispatch(Actions.closeTunnel(tunnel)),
-        workingDirectoryHost,
+          this._store.dispatch(
+            Actions.closeTunnel(tunnel, new Error('Closed from panel')),
+          ),
+        workingDirectory: state.currentWorkingDirectory,
       };
     });
 

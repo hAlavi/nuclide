@@ -6,7 +6,7 @@
  * LICENSE file in the root directory of this source tree. An additional grant
  * of patent rights can be found in the PATENTS file in the same directory.
  *
- * @flow
+ * @flow strict
  * @format
  */
 
@@ -51,7 +51,18 @@ export type Nuclicon =
   | 'nuclicon-snapshot'
   | 'nuclicon-success'
   | 'nuclicon-time-start'
-  | 'nuclicon-time-end';
+  | 'nuclicon-time-end'
+  | 'nuclicon-metro-disabled'
+  | 'nuclicon-metro-waiting'
+  | 'nuclicon-lightbulb-filled'
+  | 'nuclicon-nt'
+  | 'nuclicon-archive'
+  | 'nuclicon-infinity'
+  | 'nuclicon-desktop'
+  | 'nuclicon-mobile'
+  | 'nuclicon-lightning'
+  | 'nuclicon-haskell'
+  | 'nuclicon-on-demand';
 
 export type IconName = Nuclicon | atom$Octicon;
 

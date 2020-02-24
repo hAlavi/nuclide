@@ -13,6 +13,7 @@ import {Command, Diagnostic} from 'vscode-languageserver';
 import type {NuclideUri} from 'nuclide-commons/nuclideUri';
 import type {AddImportCommandParams} from './CommandExecutor';
 
+import {ADD_IMPORT_COMMAND_ID} from './constants';
 import {AutoImportsManager} from './lib/AutoImportsManager';
 import {ImportFormatter} from './lib/ImportFormatter';
 import {arrayFlatten} from 'nuclide-commons/collection';
@@ -22,7 +23,7 @@ import {lspRangeToAtomRange} from '../../nuclide-lsp-implementation-common/lsp-u
 import {compareForSuggestion} from './utils/util';
 
 const CODE_ACTIONS_LIMIT = 10;
-const FLOW_DIAGNOSTIC_SOURCE = 'Flow';
+const FLOW_DIAGNOSTIC_SOURCES = ['Flow', 'Flow: InferError'];
 
 export class CodeActions {
   autoImportsManager: AutoImportsManager;
@@ -61,14 +62,14 @@ function diagnosticToCommands(
 ): Array<Command> {
   if (
     diagnostic.source === DIAGNOSTIC_SOURCE ||
-    diagnostic.source === FLOW_DIAGNOSTIC_SOURCE
+    FLOW_DIAGNOSTIC_SOURCES.includes(diagnostic.source)
   ) {
     return arrayFlatten(
       autoImportsManager
         .getSuggestedImportsForRange(fileWithDiagnostic, diagnostic.range)
         .filter(suggestedImport => {
           // For Flow's diagnostics, only fire for missing types (exact match)
-          if (diagnostic.source === FLOW_DIAGNOSTIC_SOURCE) {
+          if (FLOW_DIAGNOSTIC_SOURCES.includes(diagnostic.source)) {
             if (suggestedImport.symbol.type !== 'type') {
               return false;
             }
@@ -114,7 +115,7 @@ function diagnosticToCommands(
         }
         return {
           title: `${verb} from ${importPath}`,
-          command: 'addImport',
+          command: ADD_IMPORT_COMMAND_ID,
           arguments: addImportArgs,
         };
       });

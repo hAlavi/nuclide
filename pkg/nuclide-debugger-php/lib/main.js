@@ -5,47 +5,29 @@
  * This source code is licensed under the license found in the LICENSE file in
  * the root directory of this source tree.
  *
- * @flow
+ * @flow strict-local
  * @format
  */
 
 import type {HomeFragments} from '../../nuclide-home/lib/types';
-import type {NuclideDebuggerProvider} from 'nuclide-debugger-common';
-import type {DebuggerLaunchAttachProvider} from 'nuclide-debugger-common';
-import type {NuclideUri} from 'nuclide-commons/nuclideUri';
 import type {
   AdditionalLogFilesProvider,
   AdditionalLogFile,
 } from '../../nuclide-logging/lib/rpc-types';
 import type {DeadlineRequest} from 'nuclide-commons/promise';
 
-import {HhvmLaunchAttachProvider} from './HhvmLaunchAttachProvider';
 import nuclideUri from 'nuclide-commons/nuclideUri';
 import {getHhvmDebuggerServiceByNuclideUri} from '../../nuclide-remote-connection';
 import {arrayUnique} from 'nuclide-commons/collection';
 
-export function createDebuggerProvider(): NuclideDebuggerProvider {
-  return {
-    name: 'hhvm',
-    getLaunchAttachProvider(
-      connection: NuclideUri,
-    ): ?DebuggerLaunchAttachProvider {
-      if (nuclideUri.isRemote(connection)) {
-        return new HhvmLaunchAttachProvider('Hack / PHP', connection);
-      }
-      return null;
-    },
-  };
-}
-
 export function getHomeFragments(): HomeFragments {
   return {
     feature: {
-      title: 'PHP Debugger',
+      title: 'Hack/PHP Debugger',
       icon: 'nuclicon-debugger',
       description:
-        'Connect to a PHP server process and debug Hack code from within Nuclide.',
-      command: 'nuclide-debugger:show-attach-dialog',
+        'Connect to an HHVM server process and debug Hack/PHP code from within Nuclide.',
+      command: 'debugger:show-attach-dialog',
     },
     priority: 6,
   };
@@ -63,23 +45,24 @@ async function getAdditionalLogFiles(
 
   return Promise.all(
     hostnames
-      .map(async hostname => {
-        const service = getHhvmDebuggerServiceByNuclideUri(
-          nuclideUri.createRemoteUri(hostname, '/'),
-        );
-        if (service != null) {
-          const debuggerSvc = new service.HhvmDebuggerService();
+      .map(
+        async (hostname): Promise<AdditionalLogFile> => {
+          const service = getHhvmDebuggerServiceByNuclideUri(
+            nuclideUri.createRemoteUri(hostname, '/'),
+          );
+          if (service != null) {
+            return {
+              title: `HHVM Debugger log for ${hostname}`,
+              data: await service.getDebugServerLog(),
+            };
+          }
+
           return {
             title: `HHVM Debugger log for ${hostname}`,
-            data: await debuggerSvc.createLogFilePaste(),
+            data: '<service unavailable>',
           };
-        }
-
-        return {
-          title: `HHVM Debugger log for ${hostname}`,
-          data: '<service unavailable>',
-        };
-      })
+        },
+      )
       .filter(file => file != null),
   );
 }

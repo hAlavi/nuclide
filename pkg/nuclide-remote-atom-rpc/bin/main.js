@@ -10,16 +10,20 @@
  */
 
 import type {NuclideUri} from 'nuclide-commons/nuclideUri';
-import {getCommands, startCommands} from './CommandClient';
+import {getCommands} from './CommandClient';
 import fsPromise from 'nuclide-commons/fsPromise';
 import nuclideUri from 'nuclide-commons/nuclideUri';
 import {
   setupErrorHandling,
   setupLogging,
   reportErrorAndExit,
+  reportConnectionErrorAndExit,
   EXIT_CODE_SUCCESS,
   EXIT_CODE_APPLICATION_ERROR,
   EXIT_CODE_INVALID_ARGUMENTS,
+  FailedConnectionError,
+  trackSuccess,
+  trackError,
 } from './errors';
 import {getLogger} from 'log4js';
 import yargs from 'yargs';
@@ -57,13 +61,6 @@ function parseLocationParameter(value: string): FileLocation {
   };
 }
 
-async function getRealPath(filePath: NuclideUri): Promise<NuclideUri> {
-  if (nuclideUri.isRemote(filePath)) {
-    return filePath;
-  }
-  return nuclideUri.resolve(filePath);
-}
-
 async function getIsDirectory(filePath: NuclideUri): Promise<boolean> {
   try {
     if (nuclideUri.isRemote(filePath)) {
@@ -85,15 +82,26 @@ async function main(argv): Promise<number> {
 
   // TODO(t10180337): Consider a batch API for openFile().
   if (argv._ != null && argv._.length > 0) {
-    const commands =
-      argv.port != null
-        ? await startCommands(argv.port, argv.family)
-        : await getCommands();
+    let commands;
+    try {
+      commands = await getCommands(argv, /* rejectIfZeroConnections */ true);
+    } catch (error) {
+      await trackError('atom', argv, error);
+      if (error instanceof FailedConnectionError) {
+        // Note this does not throw: reportConnectionErrorAndExit()
+        // does not return. However, we use throw to convince Flow
+        // that any code after this is unreachable.
+        throw reportConnectionErrorAndExit(error);
+      } else {
+        throw error;
+      }
+    }
 
     for (const arg of argv._) {
       const {filePath, line, column} = parseLocationParameter(arg);
-      // eslint-disable-next-line no-await-in-loop
-      const realpath = await getRealPath(filePath);
+      const realpath = nuclideUri.isRemote(filePath)
+        ? filePath
+        : await fsPromise.guessRealPath(filePath); // eslint-disable-line no-await-in-loop
       // eslint-disable-next-line no-await-in-loop
       const isDirectory = await getIsDirectory(realpath);
       try {
@@ -147,10 +155,13 @@ async function main(argv): Promise<number> {
           }
         }
       } catch (e) {
+        // eslint-disable-next-line no-await-in-loop
+        await trackError('atom', argv, e);
         reportErrorAndExit(e, EXIT_CODE_APPLICATION_ERROR);
       }
     }
   }
+  await trackSuccess('atom', argv);
   return EXIT_CODE_SUCCESS;
 }
 
@@ -177,23 +188,10 @@ async function run() {
       describe: 'Wait for the opened file to be closed in Atom before exiting',
       type: 'boolean',
     })
-    .option('p', {
-      alias: 'port',
-      describe: 'Port for connecting to nuclide',
-      type: 'number',
-    })
-    .option('f', {
-      alias: 'family',
-      describe:
-        'Address family for connecting to nuclide. Either "IPv4" or "IPv6".',
+    .option('socket', {
+      describe: 'Path to Unix domain socket on which to connect.',
       type: 'string',
     });
-  if ((argv.port == null) !== (argv.family == null)) {
-    process.stderr.write(
-      'Invalid options. Both port and family must be specified.\n',
-    );
-    process.exit(EXIT_CODE_INVALID_ARGUMENTS);
-  }
   const exitCode = await main(argv);
   process.exit(exitCode);
 }

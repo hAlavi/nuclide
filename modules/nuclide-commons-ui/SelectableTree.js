@@ -87,7 +87,7 @@ export class Tree extends React.Component<TreeProps, TreeState> {
     this._subscriptions.dispose();
   }
 
-  componentWillReceiveProps() {
+  UNSAFE_componentWillReceiveProps() {
     this.setState((state, props) => ({
       focusedPath: props.selectedPaths[props.selectedPaths.length - 1],
     }));
@@ -237,7 +237,7 @@ function AbstractTreeItem({
   node: TreeNode,
   path: NodePath,
   selectedPaths: Array<NodePath>,
-}): ?React.Element<*> {
+}): React.Node {
   if (node.hidden) {
     return null;
   }
@@ -341,7 +341,13 @@ class TreeItem extends React.Component<TreeItemProps> {
     const isSelected = selectedPaths.some(selectedPath =>
       shallowEqual(path, selectedPath),
     );
-
+    if (isSelected) {
+      process.nextTick(() => {
+        // We *are* using `scrollIntoView()` instead of the raw DOM API
+        // eslint-disable-next-line nuclide-internal/dom-apis
+        this.scrollIntoView();
+      });
+    }
     return (
       <li
         aria-activedescendant={isFocused}

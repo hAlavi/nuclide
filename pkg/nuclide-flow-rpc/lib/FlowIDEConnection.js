@@ -19,8 +19,8 @@ import * as rpc from 'vscode-jsonrpc';
 import through from 'through';
 
 import UniversalDisposable from 'nuclide-commons/UniversalDisposable';
-import SafeStreamMessageReader from '../../commons-node/SafeStreamMessageReader';
-import {track} from '../../nuclide-analytics';
+import SafeStreamMessageReader from 'nuclide-commons/SafeStreamMessageReader';
+import {track} from 'nuclide-analytics';
 import {getLogger} from 'log4js';
 
 import {FileEventKind} from '../../nuclide-open-files-rpc';
@@ -95,6 +95,7 @@ export class FlowIDEConnection {
     this._connection = rpc.createMessageConnection(
       new SafeStreamMessageReader(this._ideProcess.stdout),
       new rpc.StreamMessageWriter(this._ideProcess.stdin),
+      getLogger('FlowIDEConnection-jsonrpc'),
     );
     this._connection.listen();
 

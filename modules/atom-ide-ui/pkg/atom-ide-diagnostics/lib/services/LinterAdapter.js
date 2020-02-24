@@ -33,6 +33,12 @@ import {getLogger} from 'log4js';
 import {observableFromSubscribeFunction} from 'nuclide-commons/event';
 import nuclideUri from 'nuclide-commons/nuclideUri';
 import UniversalDisposable from 'nuclide-commons/UniversalDisposable';
+import {
+  isPending,
+  observePendingStateEnd,
+} from 'nuclide-commons-atom/pane-item';
+
+const PENDING_PANE_LINT_DEBOUNCE = 10000; // defer linting pending panes for 10s
 
 // Exported for testing.
 export function linterMessageToDiagnosticMessage(
@@ -157,22 +163,20 @@ export function linterMessageV2ToDiagnosticMessage(
       }
     });
   }
-  let text = msg.excerpt;
-  // TODO: use markdown + handle callback-based version.
-  if (typeof msg.description === 'string') {
-    text = text + '\n' + msg.description;
-  }
   return {
+    id: msg.id,
     // flowlint-next-line sketchy-null-string:off
     providerName: msg.linterName || providerName,
     type: convertLinterType(msg.severity),
     filePath: msg.location.file,
-    text,
+    text: msg.excerpt,
+    description: msg.description,
     kind: msg.kind,
     range: Range.fromObject(msg.location.position),
     trace,
     fix,
     actions,
+    getBlockComponent: msg.getBlockComponent,
   };
 }
 
@@ -260,14 +264,24 @@ export class LinterAdapter {
               const path = editor.getPath();
               const basename =
                 path == null ? '(untitled)' : nuclideUri.basename(path);
-              return Observable.using(
-                () =>
-                  new UniversalDisposable(
-                    busyReporter(
-                      `${this._provider.name}: running on "${basename}"`,
+
+              const startLinting = isPending(editor)
+                ? observePendingStateEnd(editor).timeoutWith(
+                    PENDING_PANE_LINT_DEBOUNCE,
+                    Observable.of(null),
+                  )
+                : Observable.of(null);
+
+              return startLinting.switchMap(() =>
+                Observable.using(
+                  () =>
+                    new UniversalDisposable(
+                      busyReporter(
+                        `${this._provider.name}: running on "${basename}"`,
+                      ),
                     ),
-                  ),
-                () => this._runLint(editor),
+                  () => this._runLint(editor),
+                ),
               );
             })
             // Track the previous update so we can invalidate its results.

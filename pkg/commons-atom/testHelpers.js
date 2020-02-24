@@ -159,6 +159,7 @@ export function waitsForFilePosition(
 const mountedRootComponents: Map<Element, React.Node> = new Map();
 
 const oldReactRender = ReactDOM.render.bind(ReactDOM);
+// $FlowFixMe Patching for test
 ReactDOM.render = function render<ElementType: React$ElementType>(
   element: React$Element<ElementType>,
   container: Element,
@@ -171,6 +172,7 @@ ReactDOM.render = function render<ElementType: React$ElementType>(
 const oldReactUnmountComponentAtNode = ReactDOM.unmountComponentAtNode.bind(
   ReactDOM,
 );
+// $FlowFixMe Patching for test
 ReactDOM.unmountComponentAtNode = function unmountComponentAtNode(
   container: Element,
 ): boolean {
@@ -183,6 +185,7 @@ export function getMountedReactRootNames(): Array<string> {
     .map(([element, container]) => element)
     .map(element => {
       const constructor = element.constructor;
+      // $FlowFixMe(>=0.68.0) Flow suppress (T27187857)
       if (typeof constructor.displayName === 'string') {
         return constructor.displayName;
       } else if (typeof constructor.name === 'string') {

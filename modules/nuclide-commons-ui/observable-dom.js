@@ -13,8 +13,6 @@
 /* eslint-env browser */
 /* global IntersectionObserver, PerformanceObserver, ResizeObserver, DOMRect */
 
-import type {Subscriber} from 'rxjs/Subscriber';
-
 import invariant from 'assert';
 import os from 'os';
 import {Observable, Subscription} from 'rxjs';
@@ -75,6 +73,17 @@ import {isIterable} from 'nuclide-commons/collection';
  *   mutations.subscribe(record => console.log(record));
  */
 
+// A bug in Chrome < 62 frees PerformanceObservers and their listeners
+// once the PerformanceObserver is eligible for GC:
+// https://bugs.chromium.org/p/chromium/issues/detail?id=742530
+//
+// This means that callbacks for a PerformanceObserver will stop getting called
+// (and themselves GCed) at an abitrary time.
+//
+// Intentionally hold references to all DOM Observers in this set, and delete
+// them when the last subscriber unsubscribes.
+const observers = new Set();
+
 // $FlowFixMe(>=0.55.0) Flow suppress
 type RecordCallback = (records: any, ...rest: Array<any>) => mixed;
 interface DOMObserver {
@@ -105,14 +114,13 @@ class DOMObserverObservable<
     }
   }
 
-  lift<R, S>(
-    operator: rxjs$Operator<TNext, R>,
-  ): DOMObserverObservable<R, S, TObserveArgs> {
-    const obs = new DOMObserverObservable(
-      this._DOMObserverCtor,
-      ...this._observations[0],
-    );
-    obs._observations = this._observations.slice();
+  lift<R>(operator: rxjs$Operator<TNext, R>): this {
+    const Constructor = this.constructor;
+    const [firstObservation, ...restObservations] = this._observations;
+    const obs = new Constructor(this._DOMObserverCtor, ...firstObservation);
+    for (const observation of restObservations) {
+      obs.observe(...observation);
+    }
     obs.source = this;
     obs.operator = operator;
     return obs;
@@ -165,7 +173,7 @@ class DOMObserverObservable<
     });
   }
 
-  _subscribe(subscriber: Subscriber<TNext>): rxjs$Subscription {
+  _subscribe(subscriber: rxjs$Subscriber<TNext>): rxjs$Subscription {
     if (this._refs === 0) {
       invariant(this._domObserver == null);
       this._domObserver = new this._DOMObserverCtor(records => {
@@ -175,6 +183,7 @@ class DOMObserverObservable<
       for (const observation of this._observations) {
         this._domObserver.observe(...observation);
       }
+      observers.add(this._domObserver);
     }
 
     const subscription = new Subscription();
@@ -188,6 +197,7 @@ class DOMObserverObservable<
         invariant(this._domObserver != null);
         this._domObserver.disconnect();
         this._domObserver = null;
+        observers.delete(this._domObserver);
       }
     });
 
@@ -222,7 +232,6 @@ export class IntersectionObservable extends DOMObserverObservable<
 export class MutationObservable extends DOMObserverObservable<
   Array<MutationRecord>,
   MutationRecord,
-  // $FlowFixMe
   [Node, MutationObserverInit],
 > {
   constructor(target: Node, options?: MutationObserverInit) {
@@ -232,7 +241,7 @@ export class MutationObservable extends DOMObserverObservable<
       'environment must contain MutationObserver',
     );
     // $FlowFixMe(>=0.55.0) Flow suppress
-    super(MutationObserver, target);
+    super(MutationObserver, target, options);
   }
 }
 
@@ -270,7 +279,7 @@ export class ResizeObservable extends DOMObserverObservable<
       'environment must contain ResizeObserver',
     );
 
-    if (os.platform() === 'win32') {
+    if (os.platform() === 'win32' || os.platform() === 'linux') {
       super(WindowsResizeMeasurementPatchingObserver, target);
     } else {
       // $FlowFixMe(>=0.55.0) Flow suppress
@@ -290,7 +299,7 @@ function lastRectPerTarget(
 function remeasureContentRect(
   element: HTMLElement,
   contentRect: DOMRectReadOnly,
-): DOMRect {
+): DOMRectReadOnly {
   const {clientHeight, clientWidth} = element;
 
   // Client height/width include padding
@@ -304,7 +313,7 @@ function remeasureContentRect(
   const width =
     clientWidth - parseFloat(paddingLeft) - parseFloat(paddingRight);
 
-  return new DOMRect(contentRect.x, contentRect.y, width, height);
+  return new DOMRectReadOnly(contentRect.x, contentRect.y, width, height);
 }
 
 /*

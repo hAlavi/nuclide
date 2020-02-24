@@ -10,24 +10,26 @@
  */
 
 import type TestSuiteModel from '../TestSuiteModel';
-import type {TestRunner} from '../types';
+import type {TestRunner, RunTestOption} from '../types';
 
 import nuclideUri from 'nuclide-commons/nuclideUri';
 import Console from './Console';
-import {Dropdown} from '../../../nuclide-ui/Dropdown';
+import {AtomInput} from 'nuclide-commons-ui/AtomInput';
+import {Dropdown} from 'nuclide-commons-ui/Dropdown';
 import {Toolbar} from 'nuclide-commons-ui/Toolbar';
 import {ToolbarLeft} from 'nuclide-commons-ui/ToolbarLeft';
 import {ToolbarRight} from 'nuclide-commons-ui/ToolbarRight';
 import {Checkbox} from 'nuclide-commons-ui/Checkbox';
 import {Button, ButtonSizes, ButtonTypes} from 'nuclide-commons-ui/Button';
 import nullthrows from 'nullthrows';
-import createPaneContainer from '../../../commons-atom/create-pane-container';
+import createPaneContainer from 'nuclide-commons-atom/create-pane-container';
 import * as React from 'react';
 import ReactDOM from 'react-dom';
 import TestClassTree from './TestClassTree';
 
 type Props = {
   attachDebuggerBeforeRunning: ?boolean,
+  filterMethodsValue: ?string,
   buffer: Object,
   executionState: number,
   onClickClear: (event: SyntheticMouseEvent<>) => mixed,
@@ -45,6 +47,8 @@ type State = {
   selectedTestRunnerIndex: number,
   consoleContainer: ?HTMLElement,
   treeContainer: ?HTMLElement,
+  filterMethodsShown: boolean,
+  filterMethodsText: string,
 };
 
 export default class TestRunnerPanel extends React.Component<Props, State> {
@@ -58,6 +62,8 @@ export default class TestRunnerPanel extends React.Component<Props, State> {
   _textEditorModel: TextEditor;
   // Bound Functions for use as callbacks.
   setSelectedTestRunnerIndex: Function;
+  onFilterMethodButtonClick: Function;
+  onFilterMethodTextChanged: Function;
 
   state = {
     treeContainer: null,
@@ -65,6 +71,8 @@ export default class TestRunnerPanel extends React.Component<Props, State> {
     // If there are test runners, start with the first one selected. Otherwise store -1 to
     // later indicate there were no active test runners.
     selectedTestRunnerIndex: this.props.testRunners.length > 0 ? 0 : -1,
+    filterMethodsShown: false,
+    filterMethodsText: this.props.filterMethodsValue || '',
   };
 
   componentDidMount() {
@@ -90,7 +98,7 @@ export default class TestRunnerPanel extends React.Component<Props, State> {
     });
   }
 
-  componentWillReceiveProps(nextProps: Object) {
+  UNSAFE_componentWillReceiveProps(nextProps: Object) {
     const currSelectedIndex = this.state.selectedTestRunnerIndex;
     if (currSelectedIndex === -1 && nextProps.testRunners.length > 0) {
       this.setState({selectedTestRunnerIndex: 0});
@@ -165,7 +173,7 @@ export default class TestRunnerPanel extends React.Component<Props, State> {
     // flowlint-next-line sketchy-null-string:off
     if (this.props.path) {
       pathMsg = (
-        <span title={this.props.path}>
+        <span title={this.props.path} className="inline-block">
           {nuclideUri.basename(this.props.path)}
         </span>
       );
@@ -207,6 +215,45 @@ export default class TestRunnerPanel extends React.Component<Props, State> {
           onChange={this.props.onDebuggerCheckboxChanged}
         />
       );
+    }
+
+    const filterMethodsProps = this.getSelectedTestRunnerSupportedOptions().get(
+      'filter',
+    );
+    let filterTestMethodsButton = null;
+    let filterTestMethodsTextbox = null;
+    if (filterMethodsProps) {
+      // flowlint-next-line sketchy-null-string:off
+      const buttonLabel = filterMethodsProps.label || 'Filter';
+      filterTestMethodsButton = (
+        <Button
+          className="btn"
+          icon="nuclicon-funnel"
+          size="EXTRA_SMALL"
+          buttonType={
+            this.state.filterMethodsShown ? ButtonTypes.PRIMARY : null
+          }
+          onClick={this.onFilterMethodButtonClick}
+          tooltip={{
+            title: this.state.filterMethodsShown
+              ? buttonLabel + ' (hide)'
+              : buttonLabel + ' (show)',
+          }}
+        />
+      );
+      if (this.state.filterMethodsShown) {
+        filterTestMethodsTextbox = (
+          <AtomInput
+            className="inline-block"
+            value={this.state.filterMethodsText}
+            size="sm"
+            placeholderText={filterMethodsProps.placeholderText}
+            onDidChange={this.onFilterMethodTextChanged}
+            width={250}
+            tooltip={{title: filterMethodsProps.tooltip}}
+          />
+        );
+      }
     }
 
     const running =
@@ -253,6 +300,8 @@ export default class TestRunnerPanel extends React.Component<Props, State> {
             {runStopButton}
             {attachDebuggerCheckbox}
             {pathMsg}
+            {filterTestMethodsButton}
+            {filterTestMethodsTextbox}
           </ToolbarLeft>
           <ToolbarRight>
             {runMsg}
@@ -284,10 +333,36 @@ export default class TestRunnerPanel extends React.Component<Props, State> {
     this.setState({selectedTestRunnerIndex});
   };
 
+  onFilterMethodButtonClick = (): void => {
+    this.setState(prevState => ({
+      filterMethodsShown: !prevState.filterMethodsShown,
+    }));
+  };
+
+  onFilterMethodTextChanged = (newValue: string): void => {
+    this.setState({
+      filterMethodsText: newValue,
+    });
+  };
+
   getSelectedTestRunner(): ?Object {
     const selectedTestRunnerIndex = this.state.selectedTestRunnerIndex;
     if (selectedTestRunnerIndex >= 0) {
       return this.props.testRunners[selectedTestRunnerIndex];
+    }
+  }
+
+  getSelectedTestRunnerSupportedOptions(): Map<string, RunTestOption> {
+    const runner = this.getSelectedTestRunner();
+    const supportedOptions = runner && runner.supportedOptions;
+    return supportedOptions || new Map();
+  }
+
+  getFilterMethodsValue(): string {
+    if (this.state.filterMethodsShown) {
+      return this.state.filterMethodsText;
+    } else {
+      return '';
     }
   }
 }

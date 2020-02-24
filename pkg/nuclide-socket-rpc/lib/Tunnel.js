@@ -9,29 +9,51 @@
  * @format
  */
 
+import nuclideUri from 'nuclide-commons/nuclideUri';
+import type {ResolvedTunnel} from 'nuclide-adb/lib/types';
+import type {Connection, ConnectionFactory} from './Connection';
+import type {SocketEvent, IRemoteSocket} from './types.js';
+
 import {getLogger} from 'log4js';
 import {ConnectableObservable, Observable} from 'rxjs';
 
 import net from 'net';
 
-import type {Connection, ConnectionFactory} from './Connection';
-import type {SocketEvent, TunnelDescriptor, IRemoteSocket} from './types.js';
-
 const LOG_DELTA = 500000; // log for every half megabyte of transferred data
+const DEBUG_VERBOSE = false;
+
+const activeTunnels = new Map();
 
 export function createTunnel(
-  td: TunnelDescriptor,
+  t: ResolvedTunnel,
   cf: ConnectionFactory,
 ): ConnectableObservable<SocketEvent> {
   const logStatsIfNecessary = getStatLogger(LOG_DELTA);
   let bytesReceived: number = 0;
   let bytesWritten: number = 0;
 
-  return Observable.create(observer => {
-    const descriptor = td;
-    trace(`Tunnel: creating tunnel -- ${tunnelDescription(descriptor)}`);
+  // We check if a tunnel already exists listening to the same port, if it
+  // does we stop it so this one can take precedence. The onus on managing
+  // this (not creating a tunnel if there's already one on this port) should be
+  // on the consumer of this service.
+  const tunnelKey = `${nuclideUri.nuclideUriToDisplayHostname(t.from.host)}:${
+    t.from.port
+  }`;
+  const existingTunnel = activeTunnels.get(tunnelKey);
+  if (existingTunnel) {
+    trace(
+      `Tunnel: Stopping existing tunnel -- ${tunnelDescription(
+        existingTunnel.tunnel,
+      )}`,
+    );
+    existingTunnel.dispose();
+  }
 
-    const {port, family} = descriptor.from;
+  return Observable.create(observer => {
+    const tunnel = t;
+    trace(`Tunnel: creating tunnel -- ${tunnelDescription(tunnel)}`);
+
+    const {port, family} = tunnel.from;
     const connections: Map<number, Promise<Connection>> = new Map();
 
     // set up server to start listening for connections
@@ -39,17 +61,21 @@ export function createTunnel(
     const listener: net.Server = net.createServer(async socket => {
       const clientPort = socket.remotePort;
 
-      trace('Tunnel: client connected on remote port ' + clientPort);
+      if (DEBUG_VERBOSE) {
+        trace('Tunnel: client connected on remote port ' + clientPort);
+      }
       observer.next({type: 'client_connected', clientPort});
 
       // create outgoing connection using connection factory
       const localSocket = new LocalSocket(socket);
       localSocket.onWrite(count => {
         bytesWritten += count;
-        logStatsIfNecessary(bytesWritten, bytesReceived);
+        if (DEBUG_VERBOSE) {
+          logStatsIfNecessary(bytesWritten, bytesReceived);
+        }
       });
       const remoteSocket = new RemoteSocket(localSocket);
-      const connectionPromise = cf.createConnection(td.to, remoteSocket);
+      const connectionPromise = cf.createConnection(tunnel.to, remoteSocket);
       connections.set(clientPort, connectionPromise);
 
       // set up socket listeners
@@ -57,17 +83,17 @@ export function createTunnel(
         trace(`Tunnel: timeout (port: ${clientPort}, ${this.toString()})`);
       });
 
-      socket.on('end', () => {
-        trace(
-          `Tunnel: end (port: ${clientPort}, ${tunnelDescription(descriptor)})`,
-        );
-      });
+      if (DEBUG_VERBOSE) {
+        socket.on('end', () => {
+          trace(
+            `Tunnel: end (port: ${clientPort}, ${tunnelDescription(tunnel)})`,
+          );
+        });
+      }
 
       socket.on('error', err => {
         trace(
-          `Tunnel: error (port: ${clientPort}, ${tunnelDescription(
-            descriptor,
-          )})`,
+          `Tunnel: error (port: ${clientPort}, ${tunnelDescription(tunnel)})`,
         );
         trace(`Tunnel: error (server: ${port}, client: ${clientPort}): ${err}`);
         socket.destroy(err);
@@ -85,11 +111,11 @@ export function createTunnel(
 
       socket.on('close', () => {
         // on client_disconnect remove and dispose the connection
-        trace(
-          `Tunnel: close (port: ${clientPort}, ${tunnelDescription(
-            descriptor,
-          )})`,
-        );
+        if (DEBUG_VERBOSE) {
+          trace(
+            `Tunnel: close (port: ${clientPort}, ${tunnelDescription(tunnel)})`,
+          );
+        }
         connectionPromise.then(connection => {
           connection.dispose();
           connections.delete(clientPort);
@@ -99,6 +125,7 @@ export function createTunnel(
     });
 
     listener.on('error', err => {
+      trace(`Tunnel: error listening on port ${port}): ${err}`);
       observer.error(err);
     });
 
@@ -107,8 +134,8 @@ export function createTunnel(
       observer.next({type: 'server_started'});
     });
 
-    return () => {
-      trace('Tunnel: shutting down tunnel');
+    const dispose = () => {
+      trace(`Tunnel: shutting down tunnel ${tunnelDescription(tunnel)}`);
       connections.forEach(connectionPromise =>
         connectionPromise.then(conn => {
           conn.dispose();
@@ -117,28 +144,21 @@ export function createTunnel(
       connections.clear();
       cf.dispose();
       listener.close();
+      activeTunnels.delete(tunnelKey);
     };
+
+    activeTunnels.set(tunnelKey, {dispose, tunnel});
+
+    return dispose;
   }).publish();
 }
 
-export function tunnelDescription(tunnel: TunnelDescriptor) {
-  return `${shortenHostname(tunnel.from.host)}:${
+export function tunnelDescription(tunnel: ResolvedTunnel) {
+  return `${nuclideUri.nuclideUriToDisplayHostname(tunnel.from.host)}:${
     tunnel.from.port
-  }->${shortenHostname(tunnel.to.host)}:${tunnel.to.port}`;
-}
-
-export function shortenHostname(host: string): string {
-  let result = host;
-  if (result.endsWith('.facebook.com')) {
-    result = result.slice(0, host.length - '.facebook.com'.length);
-  }
-  if (result.startsWith('our.')) {
-    result = result.slice('our.'.length, result.length);
-  }
-  if (result.startsWith('twsvcscm.')) {
-    result = result.slice('twsvcscm.'.length, result.length);
-  }
-  return result;
+  }->${nuclideUri.nuclideUriToDisplayHostname(tunnel.to.host)}:${
+    tunnel.to.port
+  }`;
 }
 
 class LocalSocket {

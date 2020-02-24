@@ -49,6 +49,19 @@ type rxjs$OperatorFunctionLast<T, R: rxjs$Observable<*>> = (
   rxjs$Observable<T>
 ) => R;
 
+type rxjs$NotificationKind = 'N' | 'C' | 'E';
+type rxjs$Notification<T> = {
+  error: any,
+  hasValue: true,
+  kind: rxjs$NotificationKind,
+  value: T,
+} | {
+  error: any,
+  hasValue: false,
+  kind: rxjs$NotificationKind,
+  value: void,
+};
+
 declare class rxjs$Observable<+T> {
   static bindCallback(
     callbackFunc: (callback: (_: void) => any) => any,
@@ -337,6 +350,8 @@ declare class rxjs$Observable<+T> {
 
   static of(...values: T[]): rxjs$Observable<T>;
 
+  static race(...sources: rxjs$Observable<T>[]): rxjs$Observable<T>;
+
   static range(
     start?: number,
     count?: number,
@@ -383,7 +398,7 @@ declare class rxjs$Observable<+T> {
 
   catch<U>(
     selector: (err: any, caught: rxjs$Observable<T>) => rxjs$Observable<U>
-  ): rxjs$Observable<U>;
+  ): rxjs$Observable<T | U>;
 
   concat<U>(...sources: rxjs$Observable<U>[]): rxjs$Observable<T | U>;
 
@@ -446,6 +461,7 @@ declare class rxjs$Observable<+T> {
     scheduler?: rxjs$SchedulerClass
   ): rxjs$Observable<T>;
 
+  filter(predicate: typeof Boolean): rxjs$Observable<$NonMaybeType<T>>;
   filter(
     predicate: (value: T, index: number) => boolean,
     thisArg?: any
@@ -456,23 +472,14 @@ declare class rxjs$Observable<+T> {
   first(
     predicate?: (value: T, index: number, source: rxjs$Observable<T>) => boolean
   ): rxjs$Observable<T>;
-  first<U>(
+  first<T>(
     predicate: ?(
       value: T,
       index: number,
       source: rxjs$Observable<T>
     ) => boolean,
-    resultSelector: (value: T, index: number) => U
-  ): rxjs$Observable<U>;
-  first<U>(
-    predicate: ?(
-      value: T,
-      index: number,
-      source: rxjs$Observable<T>
-    ) => boolean,
-    resultSelector: ?(value: T, index: number) => U,
-    defaultValue: U
-  ): rxjs$Observable<U>;
+    defaultValue: T
+  ): rxjs$Observable<T>;
 
   groupBy<K>(
     keySelector: (value: T) => K,
@@ -564,6 +571,8 @@ declare class rxjs$Observable<+T> {
   ): rxjs$Observable<V>;
 
   switchMapTo<U>(innerObservable: rxjs$Observable<U>): rxjs$Observable<U>;
+
+  materialize(): rxjs$Observable<rxjs$Notification<T>>;
 
   map<U>(f: (value: T) => U): rxjs$Observable<U>;
 
@@ -681,6 +690,8 @@ declare class rxjs$Observable<+T> {
 
   share(): rxjs$Observable<T>;
 
+  shareReplay(bufferSize?: number, windowTime?: number, scheduler?: rxjs$SchedulerClass): rxjs$Observable<T>;
+
   skip(count: number): rxjs$Observable<T>;
 
   skipUntil(other: rxjs$Observable<any> | Promise<any>): rxjs$Observable<T>;
@@ -694,6 +705,8 @@ declare class rxjs$Observable<+T> {
   subscribeOn(scheduler: rxjs$SchedulerClass): rxjs$Observable<T>;
 
   take(count: number): rxjs$Observable<T>;
+
+  takeLast(count: number): rxjs$Observable<T>;
 
   takeUntil(other: rxjs$Observable<any>): rxjs$Observable<T>;
 
@@ -732,6 +745,9 @@ declare class rxjs$Observable<+T> {
     onError: ?(error: any) => mixed,
     onCompleted: ?() => mixed
   ): rxjs$Subscription;
+
+  combineAll<U>(): rxjs$Observable<U>;
+  combineAll<U>(project: (...values: any[]) => U): rxjs$Observable<U>;
 
   static combineLatest<A, B>(
     a: rxjs$Observable<A>,

@@ -6,14 +6,28 @@
  * LICENSE file in the root directory of this source tree. An additional grant
  * of patent rights can be found in the PATENTS file in the same directory.
  *
- * @flow
+ * @flow strict
  * @format
  */
+import type {Completions} from './console/LineEditor';
+
+import {Observable} from 'rxjs';
 
 export interface ConsoleIO {
+  enterFullScreen(): void;
+
   // output does not add a newline. outputLine does.
   output(text: string): void;
   outputLine(line?: string): void;
-  stopInput(): void;
+  setPrompt(prompt: ?string): void;
+  setCompletions(completions: Completions): void;
+  prompt(): void;
+  stopInput(keepPromptWhenStopped?: boolean): void;
   startInput(): void;
+  observeInterrupts(): Observable<void>;
+  observeLines(): Observable<string>;
+  observeKeys(): Observable<string>;
+  isTTY(): boolean;
+  close(error: ?string): void;
+  setState(state: string): void;
 }

@@ -139,3 +139,39 @@ to `resources/nuclicons` and rerun the script.
 .icon-nuclicon-time-end::before {
   content: "\f125";
 }
+.icon-nuclicon-metro-disabled::before {
+  content: "\f126";
+}
+.icon-nuclicon-metro-waiting::before {
+  content: "\f127";
+}
+.icon-nuclicon-lightbulb-filled::before {
+  content: "\f128";
+}
+.icon-nuclicon-nt::before {
+  content: "\f129";
+}
+.icon-nuclicon-archive::before {
+  content: "\f12a";
+}
+.icon-nuclicon-infinity::before {
+  content: "\f12b";
+}
+.icon-nuclicon-desktop::before {
+  content: "\f12c";
+}
+.icon-nuclicon-mobile::before {
+  content: "\f12d";
+}
+.icon-nuclicon-lightning::before {
+  content: "\f12e";
+}
+.icon-nuclicon-console::before {
+  content: "\f12f";
+}
+.icon-nuclicon-haskell::before {
+  content: "\f130";
+}
+.icon-nuclicon-on-demand::before {
+  content: "\f131";
+}

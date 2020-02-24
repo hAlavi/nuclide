@@ -19,11 +19,12 @@ import type {CoverageResult} from '../../nuclide-type-coverage/lib/rpc-types';
 import type {
   DefinitionQueryResult,
   FindReferencesReturn,
+  RenameReturn,
   Outline,
   CodeAction,
+  SignatureHelp,
 } from 'atom-ide-ui';
 import type {ConnectableObservable} from 'rxjs';
-import type {NuclideEvaluationExpression} from 'nuclide-debugger-common';
 import type {
   AutocompleteRequest,
   AutocompleteResult,
@@ -32,6 +33,9 @@ import type {
   FormatOptions,
   LanguageService,
   SymbolResult,
+  Completion,
+  CodeLensData,
+  StatusData,
 } from '../../nuclide-language-service/lib/LanguageService';
 
 import {Observable} from 'rxjs';
@@ -55,11 +59,19 @@ export class NullLanguageService {
     return Promise.resolve(null);
   }
 
+  resolveAutocompleteSuggestion(suggestion: Completion): Promise<?Completion> {
+    return Promise.resolve(null);
+  }
+
   getDefinition(
     fileVersion: FileVersion,
     position: atom$Point,
   ): Promise<?DefinitionQueryResult> {
     return Promise.resolve(null);
+  }
+
+  onToggleCoverage(set: boolean): Promise<void> {
+    return Promise.resolve(undefined);
   }
 
   findReferences(
@@ -69,11 +81,30 @@ export class NullLanguageService {
     return Observable.of(null).publish();
   }
 
+  rename(
+    fileVersion: FileVersion,
+    position: atom$Point,
+    newName: string,
+  ): ConnectableObservable<?RenameReturn> {
+    return Observable.of(null).publish();
+  }
+
   getCoverage(filePath: NuclideUri): Promise<?CoverageResult> {
     return Promise.resolve(null);
   }
 
   getOutline(fileVersion: FileVersion): Promise<?Outline> {
+    return Promise.resolve(null);
+  }
+
+  getCodeLens(fileVersion: FileVersion): Promise<?Array<CodeLensData>> {
+    return Promise.resolve(null);
+  }
+
+  resolveCodeLens(
+    filePath: NuclideUri,
+    codeLens: CodeLensData,
+  ): Promise<?CodeLensData> {
     return Promise.resolve(null);
   }
 
@@ -130,10 +161,10 @@ export class NullLanguageService {
     return Promise.resolve(null);
   }
 
-  getEvaluationExpression(
+  signatureHelp(
     fileVersion: FileVersion,
     position: atom$Point,
-  ): Promise<?NuclideEvaluationExpression> {
+  ): Promise<?SignatureHelp> {
     return Promise.resolve(null);
   }
 
@@ -169,6 +200,34 @@ export class NullLanguageService {
     originalCursorPosition: atom$Point,
   ): Promise<?atom$Range> {
     return Promise.resolve(null);
+  }
+
+  observeStatus(fileVersion: FileVersion): ConnectableObservable<StatusData> {
+    return Observable.of({kind: 'null'}).publish();
+  }
+
+  async clickStatus(
+    fileVersion: FileVersion,
+    id: string,
+    button: string,
+  ): Promise<void> {}
+
+  onWillSave(fileVersion: FileVersion): ConnectableObservable<TextEdit> {
+    return Observable.empty().publish();
+  }
+
+  async sendLspRequest(
+    filePath: NuclideUri,
+    method: string,
+    params: mixed,
+  ): Promise<mixed> {}
+
+  async sendLspNotification(method: string, params: mixed): Promise<void> {}
+
+  observeLspNotifications(
+    notificationMethod: string,
+  ): ConnectableObservable<mixed> {
+    return Observable.empty().publish();
   }
 
   dispose(): void {}

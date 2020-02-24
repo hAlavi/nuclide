@@ -5,11 +5,11 @@
  * This source code is licensed under the license found in the LICENSE file in
  * the root directory of this source tree.
  *
- * @flow
+ * @flow strict-local
  * @format
  */
 
-import type {OutputProviderStatus} from 'atom-ide-ui';
+import type {ConsoleSourceStatus} from 'atom-ide-ui';
 
 export type TunnelBehavior =
   | 'open_tunnel_if_needed'
@@ -18,8 +18,10 @@ export type TunnelBehavior =
 
 // Manages starting Metro for the current working root and integrating it into Console.
 // Use this service instead of starting Metro via nuclide-metro-rpc yourself.
-export type MetroAtomService = {
-  start(tunnelBehavior: TunnelBehavior): Promise<void>,
-  stop(): void,
-  observeStatus(status: (OutputProviderStatus) => void): IDisposable,
-};
+export interface MetroAtomService {
+  start(tunnelBehavior: TunnelBehavior): Promise<void>;
+  stop(): void;
+  reloadApp(): void;
+  restart(): void;
+  observeStatus(callback: (ConsoleSourceStatus) => void): IDisposable;
+}

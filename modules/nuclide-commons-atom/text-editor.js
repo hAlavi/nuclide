@@ -13,11 +13,10 @@
 import type {NuclideUri} from 'nuclide-commons/nuclideUri';
 
 import invariant from 'assert';
-import UniversalDisposable from 'nuclide-commons/UniversalDisposable';
+import {TextEditor} from 'atom';
 import {Observable} from 'rxjs';
 
 import {observableFromSubscribeFunction} from 'nuclide-commons/event';
-import nuclideUri from 'nuclide-commons/nuclideUri';
 
 /**
  * Returns a text editor that has the given path open, or null if none exists. If there are multiple
@@ -108,62 +107,17 @@ export function observeEditorDestroy(
     .take(1);
 }
 
-// As of the introduction of atom.workspace.buildTextEditor(), it is no longer possible to
-// subclass TextEditor to create a ReadOnlyTextEditor. Instead, the way to achieve this effect
-// is to create an ordinary TextEditor and then override any methods that would allow it to
-// change its contents.
-// TODO: https://github.com/atom/atom/issues/9237.
+// Use atom readOnly attribute to set read-only state.
 export function enforceReadOnlyEditor(
   textEditor: atom$TextEditor,
   readOnlyExceptions?: Array<string> = ['append', 'setText'],
 ): IDisposable {
-  // Cancel insert events to prevent typing in the text editor and disallow editing (read-only).
-  const willInsertTextDisposable = textEditor.onWillInsertText(event => {
-    event.cancel();
-  });
-
-  return new UniversalDisposable(
-    willInsertTextDisposable,
-    // `setText` & `append` are the only exceptions that's used to set the read-only text.
-    enforceReadOnlyBuffer(textEditor.getBuffer(), readOnlyExceptions),
-  );
-}
-
-function enforceReadOnlyBuffer(
-  textBuffer: atom$TextBuffer,
-  readOnlyExceptions?: Array<string> = [],
-): IDisposable {
-  const noop = () => {};
-  // All user edits use `transact` - so, mocking this will effectively make the editor read-only.
-  const originalApplyChange = textBuffer.applyChange;
-  const originalReadOnlyExceptionFunctions = {};
-  textBuffer.applyChange = noop;
-
-  readOnlyExceptions.forEach(passReadOnlyException);
-
-  function passReadOnlyException(functionName: string) {
-    const buffer: any = textBuffer;
-    const originalFunction = buffer[functionName];
-    originalReadOnlyExceptionFunctions[functionName] = originalFunction;
-
-    buffer[functionName] = function() {
-      textBuffer.applyChange = originalApplyChange;
-      const result = originalFunction.apply(textBuffer, arguments);
-      textBuffer.applyChange = noop;
-      return result;
-    };
-  }
-
-  return new UniversalDisposable(() => {
-    textBuffer.applyChange = originalApplyChange;
-
-    const buffer: any = textBuffer;
-    readOnlyExceptions.forEach(
-      functionName =>
-        (buffer[functionName] =
-          originalReadOnlyExceptionFunctions[functionName]),
-    );
-  });
+  textEditor.getElement().setAttribute('readonly', '');
+  return {
+    dispose() {
+      textEditor.getElement().removeAttribute('readonly');
+    },
+  };
 }
 
 // Turn off soft wrap setting for these editors so diffs properly align.
@@ -187,32 +141,12 @@ export function enforceSoftWrap(
 }
 
 /**
- * Small wrapper around `atom.workspace.observeTextEditors` that filters out
- * uninitialized remote editors. Most callers should use this one instead.
+ * Checks if an object (typically an Atom pane) is a TextEditor.
+ * Could be replaced with atom.workspace.isValidTextEditor,
+ * but Flow doesn't support %checks in methods yet.
  */
-export function observeTextEditors(
-  callback: (editor: atom$TextEditor) => mixed,
-): IDisposable {
-  // The one place where atom.workspace.observeTextEditors needs to be used.
-  // eslint-disable-next-line rulesdir/atom-apis
-  return atom.workspace.observeTextEditors(editor => {
-    if (isValidTextEditor(editor)) {
-      callback(editor);
-    }
-  });
-}
-
-/**
- * Checks if an object (typically an Atom pane) is a TextEditor with a non-broken path.
- */
-export function isValidTextEditor(item: mixed): boolean {
-  // eslint-disable-next-line rulesdir/atom-apis
-  if (atom.workspace.isTextEditor(item)) {
-    return !nuclideUri.isBrokenDeserializedUri(
-      ((item: any): atom$TextEditor).getPath(),
-    );
-  }
-  return false;
+export function isValidTextEditor(item: mixed): boolean %checks {
+  return item instanceof TextEditor;
 }
 
 export function centerScrollToBufferLine(

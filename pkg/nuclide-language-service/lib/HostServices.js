@@ -21,8 +21,9 @@ import type {NuclideUri} from 'nuclide-commons/nuclideUri';
 import type {TextEdit} from 'nuclide-commons-atom/text-edit';
 
 import invariant from 'assert';
-import consumeFirstProvider from '../../commons-atom/consumeFirstProvider';
+import consumeFirstProvider from 'nuclide-commons-atom/consumeFirstProvider';
 import {getLogger} from 'log4js';
+import nuclideUri from 'nuclide-commons/nuclideUri';
 import {Observable} from 'rxjs';
 import {memoize} from 'lodash';
 import UniversalDisposable from 'nuclide-commons/UniversalDisposable';
@@ -53,17 +54,18 @@ class RootHostServices {
     dispose: () => {},
   };
 
-  _getConsoleService = memoize((): Promise<ConsoleService> =>
-    consumeFirstProvider('console', '0.1.0'),
+  _getConsoleService = memoize(
+    (): Promise<ConsoleService> => consumeFirstProvider('console', '0.1.0'),
   );
 
   // This method creates registers sources with the atom-ide-console service, but never disposes
   // those registrations; there's not much point. The now-defunct sources will be visible in the
   // Sources UI.
-  _getConsoleApi = memoize((source: string): Promise<ConsoleApi> =>
-    this._getConsoleService().then(createApi =>
-      createApi({id: source, name: source}),
-    ),
+  _getConsoleApi = memoize(
+    (source: string): Promise<ConsoleApi> =>
+      this._getConsoleService().then(createApi =>
+        createApi({id: source, name: source}),
+      ),
   );
 
   consoleNotification(
@@ -82,15 +84,21 @@ class RootHostServices {
   ): ConnectableObservable<void> {
     // We return a ConnectableObservable such that
     // (1) when code connects to it then we display the dialog
-    // (2) when user dismiss the dialog then we complete the stream
+    // (2) when the dialog closes we complete the stream
     // (3) if code unsubscribed before that, then we dismiss the dialog
-    return Observable.create(observer => {
-      const notification = this._atomNotification(level, text, {
-        dismissable: true,
-      });
-      notification.onDidDismiss(() => observer.complete());
-      return () => notification.dismiss();
-    }).publish();
+    return (
+      Observable.create(observer => {
+        const notification = this._atomNotification(level, text);
+        return () => {
+          notification.dismiss();
+        };
+      })
+        // Note: notification.onDidDismiss never fires for non-dismissable notifications!
+        // However non-dismissable notifications have a fixed 5s duration:
+        // https://github.com/atom/notifications/blob/master/lib/notification-element.coffee#L50
+        .takeUntil(Observable.timer(5000))
+        .publish()
+    );
   }
 
   dialogRequest(
@@ -222,5 +230,32 @@ class RootHostServices {
       default:
         invariant(false, 'Unrecognized ShowMessageLevel');
     }
+  }
+
+  // Returns false if there is no such registered command on the active text
+  // editor. Otherwise returns true and dispatches the command.
+  async dispatchCommand(
+    command: string,
+    params: {|args: any, projectRoot: NuclideUri|},
+  ): Promise<boolean> {
+    const textEditor = atom.workspace.getActiveTextEditor();
+    const target = textEditor != null ? textEditor.getElement() : null;
+    if (target == null) {
+      return false;
+    }
+    const commands = atom.commands.findCommands({target});
+    if (commands.find(c => c.name === command) == null) {
+      return false;
+    }
+    // The LSPLanguageService forwards the args directly from the language server
+    // and so all the URIs in the args are local to the remote server. Pass in
+    // the hostname here so that we can easily resolve the URIs on the client side.
+    atom.commands.dispatch(target, command, {
+      hostname: nuclideUri.isRemote(params.projectRoot)
+        ? nuclideUri.getHostname(params.projectRoot)
+        : null,
+      args: params.args,
+    });
+    return true;
   }
 }

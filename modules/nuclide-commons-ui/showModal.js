@@ -94,7 +94,7 @@ export default function showModal(
         disposable.dispose();
       }
     }),
-    atom.commands.add('atom-workspace', 'core:cancel', () => {
+    atom.commands.add('body', 'core:cancel', () => {
       if (shouldDismissOnPressEscape()) {
         disposable.dispose();
       }
@@ -106,10 +106,7 @@ export default function showModal(
       }
       ReactDOM.unmountComponentAtNode(hostElement);
       atomPanel.destroy();
-      if (
-        document.activeElement === document.body &&
-        previouslyFocusedElement != null
-      ) {
+      if (previouslyFocusedElement != null) {
         previouslyFocusedElement.focus();
       }
     },

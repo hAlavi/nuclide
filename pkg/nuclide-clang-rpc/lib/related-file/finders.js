@@ -9,16 +9,28 @@
  * @format
  */
 
+import {findSubArrayIndex} from 'nuclide-commons/collection';
 import nuclideUri from 'nuclide-commons/nuclideUri';
+import {SimpleCache} from 'nuclide-commons/SimpleCache';
 import {getFileBasename, isHeaderFile, isSourceFile} from '../utils';
-import {searchFileWithBasename, findSubArrayIndex} from './common';
+import {searchFileWithBasename} from './common';
 import {
   getRelatedHeaderForSourceFromFramework,
   getRelatedSourceForHeaderFromFramework,
 } from './objc-framework';
 import {findIncludingSourceFile} from './grep-finder';
 
+// If the source for a header is null, recheck after 10 minutes.
+const SOURCE_FOR_HEADER_RECHECK_INTERVAL = 10 * 60 * 1000;
+
 export class RelatedFileFinder {
+  // Finding the source file that relates to header may be very expensive
+  // because we grep for '#include' directives, so cache the results.
+  _sourceForHeaderCache: SimpleCache<
+    {header: string, projectRoot: ?string},
+    Promise<{source: ?string, time: number}>,
+  > = new SimpleCache({keyFactory: key => JSON.stringify(key)});
+
   async getRelatedHeaderForSource(src: string): Promise<?string> {
     // search in folder
     const header = await searchFileWithBasename(
@@ -34,6 +46,26 @@ export class RelatedFileFinder {
   }
 
   async getRelatedSourceForHeader(
+    header: string,
+    projectRoot: ?string,
+  ): Promise<?string> {
+    const {source, time} = await this._sourceForHeaderCache.getOrCreate(
+      {header, projectRoot},
+      () =>
+        this._getRelatedSourceForHeaderImpl(header, projectRoot).then(src => ({
+          source: src,
+          time: Date.now(),
+        })),
+    );
+    const now = Date.now();
+    if (source == null && now > time + SOURCE_FOR_HEADER_RECHECK_INTERVAL) {
+      this._sourceForHeaderCache.delete({header, projectRoot});
+      return this.getRelatedHeaderForSource(header);
+    }
+    return source;
+  }
+
+  async _getRelatedSourceForHeaderImpl(
     header: string,
     projectRoot: ?string,
   ): Promise<?string> {
@@ -59,16 +91,27 @@ export class RelatedFileFinder {
       }
     }
 
-    return findIncludingSourceFile(
+    source = await findIncludingSourceFile(
       header,
       this._inferProjectRoot(header),
     ).toPromise();
-  }
 
-  _getProjectRoots(): string[] {
+    if (source != null) {
+      return source;
+    }
+
     try {
       // $FlowFB
-      return require('./fb-project-roots').getFBProjectRoots();
+      return require('./fb/fallback-finder').findIncludingSourceFile(header);
+    } catch (e) {
+      return null;
+    }
+  }
+
+  _getFBProjectRoots(): string[] {
+    try {
+      // $FlowFB
+      return require('./fb/project-roots').getFBProjectRoots();
     } catch (e) {}
     return [];
   }
@@ -80,7 +123,7 @@ export class RelatedFileFinder {
    */
   _inferProjectRoot(file: string): string {
     const pathParts = nuclideUri.split(file);
-    for (const root of this._getProjectRoots()) {
+    for (const root of this._getFBProjectRoots()) {
       const offset = findSubArrayIndex(pathParts, nuclideUri.split(root));
       if (offset !== -1) {
         return nuclideUri.join(...pathParts.slice(0, offset), root);

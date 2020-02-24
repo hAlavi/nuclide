@@ -21,14 +21,11 @@ import type {NotifiersByConnection} from './NotifiersByConnection';
 import invariant from 'assert';
 import UniversalDisposable from 'nuclide-commons/UniversalDisposable';
 import {getLogger} from 'log4js';
-import semver from 'semver';
 import {FileEventKind} from '../../nuclide-open-files-rpc';
 
 const logger = getLogger('nuclide-open-files');
 
 const RESYNC_TIMEOUT_MS = 2000;
-
-const ATOM_VERSION_CHECK_FOR_LANGUAGE_ID = '1.24.0-beta0';
 
 // Watches a TextBuffer for change/rename/destroy events and then sends
 // those events to the FileNotifier or NotifiersByConnection as appropriate.
@@ -80,8 +77,8 @@ export class BufferSubscription {
         const version = this._changeCount;
 
         invariant(this._notifier != null);
-        const notifier = await this._notifier;
         if (this._sentOpen) {
+          const notifier = await this._notifier;
           // Changes must be sent in reverse order to ensure that they are applied cleanly.
           // (Atom ensures that they are sent over in increasing lexicographic order).
           for (let i = event.changes.length - 1; i >= 0; i--) {
@@ -100,7 +97,7 @@ export class BufferSubscription {
             });
           }
         } else {
-          this._sendOpenByNotifier(notifier, version);
+          this._sendOpenByNotifier(this._notifier, version);
         }
       }),
     );
@@ -115,19 +112,18 @@ export class BufferSubscription {
         invariant(filePath != null);
 
         invariant(this._notifier != null);
-        const notifier = await this._notifier;
         const version = this._changeCount;
         if (this._sentOpen) {
           this.sendEvent({
             kind: FileEventKind.SAVE,
             fileVersion: {
-              notifier,
+              notifier: await this._notifier,
               filePath,
               version,
             },
           });
         } else {
-          this._sendOpenByNotifier(notifier, version);
+          this._sendOpenByNotifier(this._notifier, version);
         }
       }),
     );
@@ -142,23 +138,24 @@ export class BufferSubscription {
     // TODO: Could watch onDidReload() which will catch the case where an empty file is opened
     // after startup, leaving the only failure the reopening of empty files at startup.
     if (this._buffer.getText() !== '' && this._notifier != null) {
-      this._notifier.then(notifier =>
-        this._sendOpenByNotifier(notifier, this._changeCount),
-      );
+      this._sendOpenByNotifier(this._notifier, this._changeCount);
     }
   }
 
-  _sendOpenByNotifier(notifier: FileNotifier, version: number): void {
+  async _sendOpenByNotifier(
+    notifier: Promise<FileNotifier>,
+    version: number,
+  ): Promise<void> {
+    const contents = this._buffer.getText();
     const filePath = this._buffer.getPath();
     invariant(filePath != null);
 
-    const contents = this._buffer.getText();
     const languageId = this._getLanguageId(filePath, contents);
     this._sentOpen = true;
     this.sendEvent({
       kind: FileEventKind.OPEN,
       fileVersion: {
-        notifier,
+        notifier: await notifier,
         filePath,
         version,
       },
@@ -167,13 +164,8 @@ export class BufferSubscription {
     });
   }
 
-  /** TODO(hansonw): remove version check after Atom 1.24 drops. */
   _getLanguageId(filePath: string, contents: string): string {
-    if (semver.gte(atom.getVersion(), ATOM_VERSION_CHECK_FOR_LANGUAGE_ID)) {
-      return this._buffer.getLanguageMode().getLanguageId();
-    }
-
-    return atom.grammars.selectGrammar(filePath, contents).scopeName;
+    return this._buffer.getLanguageMode().getLanguageId();
   }
 
   getVersion(): number {

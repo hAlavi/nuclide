@@ -9,7 +9,7 @@
  * @format
  */
 
-import type {AddMessagesType, ClearType} from './PanelViewModel';
+import type {AddMessagesType, FunctionType} from './PanelViewModel';
 
 import {AtomInput} from 'nuclide-commons-ui/AtomInput';
 import {Button} from 'nuclide-commons-ui/Button';
@@ -17,7 +17,9 @@ import * as React from 'react';
 
 type Props = {
   addMessages: AddMessagesType,
-  clear: ClearType,
+  clear: FunctionType,
+  changeMessageLine: FunctionType,
+  changeMessageContent: FunctionType,
 };
 
 export default class PanelView extends React.Component<Props> {
@@ -27,6 +29,11 @@ export default class PanelView extends React.Component<Props> {
         <Group severity="error" addMessages={this.props.addMessages} />
         <Group severity="warning" addMessages={this.props.addMessages} />
         <Group severity="info" addMessages={this.props.addMessages} />
+        <Group
+          severity="info"
+          kind="review"
+          addMessages={this.props.addMessages}
+        />
         <br />
         <Button
           onClick={() => {
@@ -34,6 +41,21 @@ export default class PanelView extends React.Component<Props> {
           }}>
           Clear
         </Button>
+        <br />
+        <Button
+          onClick={() => {
+            this.props.changeMessageLine();
+          }}>
+          Change Messages Position to selection
+        </Button>
+        <br />
+        <Button
+          onClick={() => {
+            this.props.changeMessageContent();
+          }}>
+          Change Messages Content
+        </Button>
+        <br />
       </div>
     );
   }
@@ -42,6 +64,7 @@ export default class PanelView extends React.Component<Props> {
 class Group extends React.Component<{
   addMessages: AddMessagesType,
   severity: 'error' | 'warning' | 'info',
+  kind?: 'review',
 }> {
   _input: ?AtomInput;
 
@@ -54,13 +77,26 @@ class Group extends React.Component<{
     if (Number.isNaN(n)) {
       return;
     }
-    this.props.addMessages(this.props.severity, n);
+    const {severity, kind} = this.props;
+    const option =
+      severity === 'info' && kind === 'review'
+        ? {
+            getBlockComponent() {
+              return BlockComponent;
+            },
+          }
+        : null;
+    this.props.addMessages(severity, n, kind, option);
   };
 
   render() {
+    const {severity, kind} = this.props;
     return (
       <div>
-        <h1>{this.props.severity}</h1>
+        <h1>
+          {severity}
+          {kind ? ' + ' + kind : ''}
+        </h1>
         <AtomInput
           ref={input => {
             this._input = input;
@@ -68,6 +104,17 @@ class Group extends React.Component<{
           initialValue="1"
         />
         <Button onClick={this._onButtonClick}>Add</Button>
+      </div>
+    );
+  }
+}
+
+class BlockComponent extends React.Component<{}> {
+  render() {
+    return (
+      <div>
+        <h1>Hello! This is a DOM diagnostic message🐲</h1>
+        <textarea />
       </div>
     );
   }

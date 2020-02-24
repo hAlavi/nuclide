@@ -5,10 +5,6 @@
   "description": "Utilities for interacting with fbsimctl",
   "author": "NEEDS OWNER",
   "nuclide": {
-    "packageType": "Node",
-    "testRunner": "npm"
-  },
-  "scripts": {
-    "test": "node ../nuclide-jasmine/bin/jasmine-node-transpiled spec"
+    "packageType": "AtomLibrary"
   }
 }

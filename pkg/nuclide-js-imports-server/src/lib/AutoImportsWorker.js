@@ -16,19 +16,21 @@ import os from 'os';
 import fsPromise from 'nuclide-commons/fsPromise';
 import nuclideUri from 'nuclide-commons/nuclideUri';
 import {compact} from 'nuclide-commons/observable';
+import {arrayCompact, arrayFlatten} from 'nuclide-commons/collection';
 import ExportCache from './ExportCache';
 import {getExportsFromAst, idFromFileName} from './ExportManager';
 import {Observable} from 'rxjs';
 import {parseFile} from './AutoImportsManager';
 import {initializeLoggerForWorker} from '../../logging/initializeLogging';
-import UniversalDisposable from 'nuclide-commons/UniversalDisposable';
 import {getConfigFromFlow} from '../Config';
 import {niceSafeSpawn} from 'nuclide-commons/nice';
 import invariant from 'assert';
 import {getHasteName, hasteReduceName} from './HasteUtils';
 import {watchDirectory, getFileIndex} from './file-index';
+import {getComponentDefinitionFromAst} from '../../../nuclide-ui-component-tools-common';
 
 import type {NuclideUri} from 'nuclide-commons/nuclideUri';
+import type {ComponentDefinition} from '../../../nuclide-ui-component-tools-common/lib/types';
 import type {HasteSettings} from '../Config';
 import type {JSExport} from './types';
 import type {FileChange} from 'nuclide-watchman-helpers';
@@ -43,16 +45,16 @@ const CONCURRENCY = 1;
 // For this reason, it's very important to send updates in smaller batches.
 const BATCH_SIZE = 500;
 
-const MAX_WORKERS = Math.round(os.cpus().length / 2);
+const cpus = os.cpus();
+const MAX_WORKERS = cpus ? Math.max(1, Math.round(cpus.length / 2)) : 1;
 const MIN_FILES_PER_WORKER = 100;
-
-const disposables = new UniversalDisposable();
 
 export type ExportUpdateForFile = {
   updateType: 'setExports' | 'deleteExports',
   file: NuclideUri,
   sha1?: string,
   exports: Array<JSExport>,
+  componentDefinition?: ComponentDefinition,
 };
 
 async function main() {
@@ -79,36 +81,52 @@ async function main() {
   const index = await getFileIndex(root, configFromFlow);
   const newCache = new ExportCache({root, configFromFlow});
 
-  disposables.add(
-    Observable.merge(
-      indexDirectory(index, hasteSettings),
-      indexNodeModules(index),
-    ).subscribe(
-      message => {
-        sendUpdatesBatched(message);
-        message.forEach(update => {
-          if (update.sha1 != null) {
-            newCache.set(
-              {filePath: update.file, sha1: update.sha1},
-              update.exports,
-            );
-          }
-        });
-      },
-      error => {
-        logger.error('Received error while indexing files', error);
-      },
-      () => {
-        newCache.save().then(success => {
-          if (success) {
-            logger.info(`Saved cache of size ${newCache.getByteSize()}`);
+  // eslint-disable-next-line nuclide-internal/unused-subscription
+  Observable.merge(
+    indexDirectory(index, hasteSettings),
+    indexNodeModules(index),
+  ).subscribe(
+    message => {
+      sendUpdatesBatched(message);
+      message.forEach(update => {
+        if (update.sha1 != null) {
+          const key = {filePath: update.file, sha1: update.sha1};
+          const value = {exports: update.exports};
+          if (update.componentDefinition != null) {
+            newCache.set(key, {
+              ...value,
+              componentDefinition: update.componentDefinition,
+            });
           } else {
-            logger.warn(`Failed to save cache to ${newCache.getPath()}`);
+            newCache.set(key, value);
           }
-        });
-      },
-    ),
+        }
+      });
+    },
+    error => {
+      logger.error('Received error while indexing files', error);
+    },
+    () => {
+      newCache.save().then(success => {
+        if (success) {
+          logger.info(`Saved cache of size ${newCache.getByteSize()}`);
+        } else {
+          logger.warn(`Failed to save cache to ${newCache.getPath()}`);
+        }
+        disposeForGC(index, newCache);
+      });
+    },
   );
+}
+
+// It appears that the index/cache objects are retained by RxJS.
+// To enable garbage collection after indexing, manually clear out the objects.
+function disposeForGC(index: FileIndex, cache: ExportCache) {
+  index.jsFiles.length = 0;
+  index.nodeModulesPackageJsonFiles.length = 0;
+  index.mainFiles.clear();
+  index.exportCache._cache = (null: any);
+  cache._cache = (null: any);
 }
 
 // Watches a directory for changes and reindexes files as needed.
@@ -116,20 +134,19 @@ function watchDirectoryRecursively(
   root: NuclideUri,
   hasteSettings: HasteSettings,
 ) {
-  disposables.add(
-    watchDirectory(root)
-      .mergeMap(
-        (fileChange: FileChange) =>
-          handleFileChange(root, fileChange, hasteSettings),
-        CONCURRENCY,
-      )
-      .subscribe(
-        () => {},
-        error => {
-          logger.error(`Failed to watch ${root}`, error);
-        },
-      ),
-  );
+  // eslint-disable-next-line nuclide-internal/unused-subscription
+  watchDirectory(root)
+    .mergeMap(
+      (fileChange: FileChange) =>
+        handleFileChange(root, fileChange, hasteSettings),
+      CONCURRENCY,
+    )
+    .subscribe(
+      () => {},
+      error => {
+        logger.error(`Failed to watch ${root}`, error);
+      },
+    );
 }
 
 async function handleFileChange(
@@ -175,7 +192,8 @@ export function indexDirectory(
           updateType: 'setExports',
           file: filePath,
           sha1,
-          exports: cached,
+          exports: cached.exports,
+          componentDefinition: cached.componentDefinition,
         });
         return;
       }
@@ -215,7 +233,7 @@ export function indexDirectory(
       const updateStream = Observable.fromEvent(worker, 'message')
         .takeUntil(
           Observable.fromEvent(worker, 'error').do(error => {
-            logger.warn(`Worker ${workerId} had received ${error}`);
+            logger.warn(`Worker ${workerId} had received`, error);
           }),
         )
         .takeUntil(
@@ -238,18 +256,19 @@ export function indexDirectory(
       );
     });
 
-  return Observable.of(cachedUpdates)
+  return Observable.of([cachedUpdates])
     .concat(workerMessages)
     .map(message => {
       // Inject the main files at this point, since we have a list of all map files.
       // This could be pure but it's just not worth the cost.
-      message.forEach(update => {
+      const msg = arrayFlatten(arrayCompact(message));
+      msg.forEach(update => {
         const mainDir = mainFiles.get(update.file);
         if (mainDir != null) {
           decorateExportUpdateWithMainDirectory(update, mainDir);
         }
       });
-      return message;
+      return msg;
     });
 }
 
@@ -307,7 +326,7 @@ function getExportsForFileWithMain(
   });
 }
 
-async function getExportsForFile(
+export async function getExportsForFile(
   file: NuclideUri,
   hasteSettings: HasteSettings,
   fileContents_?: string,
@@ -343,7 +362,21 @@ async function getExportsForFile(
         jsExport.hasteName = hasteName;
       });
     }
-    return {...update, exports};
+
+    const updateObj: ExportUpdateForFile = {...update, exports};
+    const settings = process.env.JS_IMPORTS_INITIALIZATION_SETTINGS;
+    const {componentModulePathFilter} =
+      settings != null ? JSON.parse(settings) : {};
+    if (
+      componentModulePathFilter == null ||
+      file.includes(componentModulePathFilter)
+    ) {
+      const definition = getComponentDefinitionFromAst(file, ast);
+      if (definition != null) {
+        updateObj.componentDefinition = definition;
+      }
+    }
+    return updateObj;
   } catch (err) {
     logger.error(`Unexpected error indexing ${file}`, err);
     return null;
@@ -353,7 +386,7 @@ async function getExportsForFile(
 function setupDisconnectedParentHandler(): void {
   process.on('disconnect', () => {
     logger.debug('Parent process disconnected. AutoImportsWorker terminating.');
-    exitCleanly();
+    process.exit(0);
   });
 }
 
@@ -390,26 +423,28 @@ function getHasteNames(
   hasteSettings: HasteSettings,
 ): Array<ExportUpdateForFile> {
   return files
-    .map((file): ?ExportUpdateForFile => {
-      const hasteName = hasteReduceName(file, hasteSettings);
-      if (hasteName == null) {
-        return null;
-      }
-      return {
-        file,
-        updateType: 'setExports',
-        exports: [
-          {
-            id: idFromFileName(hasteName),
-            uri: nuclideUri.join(root, file),
-            line: 1,
-            hasteName,
-            isTypeExport: false,
-            isDefault: true,
-          },
-        ],
-      };
-    })
+    .map(
+      (file): ?ExportUpdateForFile => {
+        const hasteName = hasteReduceName(file, hasteSettings);
+        if (hasteName == null) {
+          return null;
+        }
+        return {
+          file,
+          updateType: 'setExports',
+          exports: [
+            {
+              id: idFromFileName(hasteName),
+              uri: nuclideUri.join(root, file),
+              line: 1,
+              hasteName,
+              isTypeExport: false,
+              isDefault: true,
+            },
+          ],
+        };
+      },
+    )
     .filter(Boolean);
 }
 export function indexNodeModules({
@@ -446,7 +481,8 @@ async function handleNodeModule(
         updateType: 'setExports',
         file: entryPoint,
         sha1,
-        exports: cachedUpdate,
+        exports: cachedUpdate.exports,
+        componentDefinition: cachedUpdate.componentDefinition,
       };
     }
     // TODO(hansonw): How do we handle haste modules inside Node modules?
@@ -527,6 +563,7 @@ function runChild() {
   const {hasteSettings} = getConfigFromFlow(root);
   process.on('message', message => {
     const {files} = message;
+    // eslint-disable-next-line nuclide-internal/unused-subscription
     Observable.from(files)
       .concatMap((file, index) => {
         // Note that we explicitly skip the main check here.
@@ -536,7 +573,7 @@ function runChild() {
       .let(compact)
       .bufferCount(BATCH_SIZE)
       .mergeMap(send, SEND_CONCURRENCY)
-      .subscribe({complete: exitCleanly});
+      .subscribe({complete: () => process.exit(0)});
   });
 }
 
@@ -547,11 +584,6 @@ function shuffle(array) {
     array[i - 1] = array[j];
     array[j] = temp;
   }
-}
-
-function exitCleanly() {
-  disposables.dispose();
-  process.exit(0);
 }
 
 main();

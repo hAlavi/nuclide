@@ -13,6 +13,9 @@
 import invariant from 'assert';
 import * as React from 'react';
 import {shell} from 'electron';
+import createDOMPurify from 'dompurify';
+
+const domPurify = createDOMPurify();
 
 type DiagnosticsMessageTextProps = {
   preserveNewlines?: boolean, // defaults to true
@@ -75,6 +78,7 @@ const NBSP = '\xa0';
 function renderRowWithLinks(
   message: string,
   rowIndex: number,
+  rows: Array<string>,
 ): React.Element<any> {
   const messageWithWhitespace = message.replace(
     LEADING_WHITESPACE_RE,
@@ -99,7 +103,7 @@ function renderRowWithLinks(
     // We need to use a span here instead of a div so that `text-overflow: ellipsis` works.
     <span key={rowIndex}>
       {parts}
-      <br />
+      {rowIndex !== rows.length - 1 && <br />}
     </span>
   );
 }
@@ -110,7 +114,9 @@ export const DiagnosticsMessageText = (props: DiagnosticsMessageTextProps) => {
     return (
       <span
         title={message.text}
-        dangerouslySetInnerHTML={{__html: message.html}}
+        dangerouslySetInnerHTML={{
+          __html: domPurify.sanitize(message.html),
+        }}
       />
     );
   } else if (message.text != null) {

@@ -10,486 +10,160 @@
  */
 
 import type {NuclideUri} from 'nuclide-commons/nuclideUri';
-import type {VSAdapterExecutableInfo} from 'nuclide-debugger-common';
-import type {OCamlDebugStartInfo} from '../../../modules/nuclide-debugger-vsps/vscode-ocaml/OCamlDebugger';
+import type {IProcessConfig, VsAdapterType} from 'nuclide-debugger-common';
 import type {
-  PythonDebuggerAttachTarget,
-  RemoteDebugCommandRequest,
-} from '../../nuclide-debugger-vsp-rpc/lib/RemoteDebuggerCommandService';
-import type {Adapter} from 'nuclide-debugger-vsps/main';
-import type {ReactNativeAttachArgs, ReactNativeLaunchArgs} from './types';
-
-import {diffSets, fastDebounce} from 'nuclide-commons/observable';
-import UniversalDisposable from 'nuclide-commons/UniversalDisposable';
-import {getDebuggerService} from '../../commons-atom/debugger';
-import VspProcessInfo from './VspProcessInfo';
+  AutoGenConfig,
+  AutoGenLaunchConfig,
+  NativeVsAdapterType,
+  AutoGenAttachConfig,
+} from 'nuclide-debugger-common/types';
 import nuclideUri from 'nuclide-commons/nuclideUri';
-// eslint-disable-next-line rulesdir/no-unresolved
-import {VsAdapterTypes} from 'nuclide-debugger-common/main';
-import {
-  ServerConnection,
-  getRemoteDebuggerCommandServiceByNuclideUri,
-} from '../../nuclide-remote-connection';
-import {getLogger} from 'log4js';
-import {Observable} from 'rxjs';
-import {track} from '../../nuclide-analytics';
-import {isRunningInTest} from '../../commons-node/system-info';
-import {getNodeBinaryPath} from '../../commons-node/node-info';
+import {VsAdapterTypes} from 'nuclide-debugger-common';
+import * as React from 'react';
 
-const DEFAULT_DEBUG_OPTIONS = new Set([
-  'WaitOnAbnormalExit',
-  'WaitOnNormalExit',
-  'RedirectOutput',
-]);
-
-export const REACT_NATIVE_PACKAGER_DEFAULT_PORT = 8081;
-
-// Delay starting the remote debug server to avoid affecting Nuclide's startup.
-const REMOTE_DEBUG_SERVICES_DELAYED_STARTUP_MS = 10 * 1000;
-
-export async function getPythonParLaunchProcessInfo(
-  parPath: NuclideUri,
-  args: Array<string>,
-): Promise<VspProcessInfo> {
-  return new VspProcessInfo(
-    parPath,
-    'launch',
-    VsAdapterTypes.PYTHON,
-    await getPythonAdapterInfo(parPath),
-    true, // showThreads
-    getPythonParConfig(parPath, args),
-  );
-}
-
-export async function getPythonScriptLaunchProcessInfo(
-  scriptPath: NuclideUri,
-  pythonPath: string,
+export type VspNativeDebuggerLaunchBuilderParms = {
   args: Array<string>,
   cwd: string,
-  env: Object,
-): Promise<VspProcessInfo> {
-  return new VspProcessInfo(
-    scriptPath,
-    'launch',
-    VsAdapterTypes.PYTHON,
-    await getPythonAdapterInfo(scriptPath),
-    true, // showThreads
-    getPythonScriptConfig(scriptPath, pythonPath, cwd, args, env),
-  );
-}
+  env: Array<string>,
+  sourcePath: string,
+};
 
-async function getAdapterExecutableWithProperNode(
-  adapterType: Adapter,
-  path: NuclideUri,
-): Promise<VSAdapterExecutableInfo> {
-  const service = getRemoteDebuggerCommandServiceByNuclideUri(path);
-  const adapterInfo = await service.getAdapterExecutableInfo(adapterType);
+export type VspNativeDebuggerAttachBuilderParms = {
+  pid?: number,
+  sourcePath: string,
+  stopCommands?: Array<string>,
+};
 
-  if (adapterInfo.command === 'node') {
-    adapterInfo.command = await getNodeBinaryPath(path);
-  }
-
-  return adapterInfo;
-}
-
-async function getPythonAdapterInfo(
-  path: NuclideUri,
-): Promise<VSAdapterExecutableInfo> {
-  return getAdapterExecutableWithProperNode('python', path);
-}
-
-function getPythonParConfig(parPath: NuclideUri, args: Array<string>): Object {
-  const localParPath = nuclideUri.getPath(parPath);
-  const cwd = nuclideUri.dirname(localParPath);
-  return {
-    stopOnEntry: false,
-    console: 'none',
-    // Will be replaced with the main module at runtime.
-    program: '/dev/null',
-    args,
-    debugOptions: Array.from(DEFAULT_DEBUG_OPTIONS),
-    pythonPath: localParPath,
-    cwd,
+export function getNativeAutoGenConfig(
+  vsAdapterType: NativeVsAdapterType,
+): AutoGenConfig {
+  const program = {
+    name: 'program',
+    type: 'path',
+    description: 'Input the program/executable you want to launch',
+    required: true,
+    visible: true,
   };
-}
-
-function getPythonScriptConfig(
-  scriptPath: NuclideUri,
-  pythonPath: string,
-  cwd: string,
-  args: Array<string>,
-  env: Object,
-): Object {
-  return {
-    stopOnEntry: false,
-    console: 'none',
-    program: nuclideUri.getPath(scriptPath),
-    cwd,
-    args,
-    env,
-    debugOptions: Array.from(DEFAULT_DEBUG_OPTIONS),
-    pythonPath,
+  const cwd = {
+    name: 'cwd',
+    type: 'path',
+    description: 'Working directory for the launched executable',
+    required: true,
+    visible: true,
   };
-}
-
-async function getPythonAttachTargetProcessInfo(
-  targetRootUri: NuclideUri,
-  target: PythonDebuggerAttachTarget,
-): Promise<VspProcessInfo> {
-  return new VspProcessInfo(
-    targetRootUri,
-    'attach',
-    VsAdapterTypes.PYTHON,
-    await getPythonAdapterInfo(targetRootUri),
-    true, // showThreads
-    getPythonAttachTargetConfig(target),
-  );
-}
-
-function getPythonAttachTargetConfig(
-  target: PythonDebuggerAttachTarget,
-): Object {
-  const debugOptions = new Set(DEFAULT_DEBUG_OPTIONS);
-  (target.debugOptions || []).forEach(opt => debugOptions.add(opt));
-  return {
-    localRoot: target.localRoot,
-    remoteRoot: target.remoteRoot,
-    // debugOptions: Array.from(debugOptions),
-    port: target.port,
-    host: '127.0.0.1',
+  const args = {
+    name: 'args',
+    type: 'array',
+    itemType: 'string',
+    description: 'Arguments to the executable',
+    required: false,
+    defaultValue: '',
+    visible: true,
   };
-}
+  const env = {
+    name: 'env',
+    type: 'array',
+    itemType: 'string',
+    description: 'Environment variables (e.g., SHELL=/bin/bash PATH=/bin)',
+    required: false,
+    defaultValue: '',
+    visible: true,
+  };
+  const sourcePath = {
+    name: 'sourcePath',
+    type: 'path',
+    description: 'Optional base path for sources',
+    required: false,
+    defaultValue: '',
+    visible: true,
+  };
+  const corePath = {
+    name: 'coreDumpPath',
+    type: 'path',
+    description: 'Optional path to a core file to load in the debugger',
+    required: false,
+    defaultValue: '',
+    visible: true,
+  };
+  const stopOnEntry = {
+    name: 'pauseProgramOnEntry',
+    type: 'boolean',
+    description:
+      'If true, the debugger will stop the program at entry before starting execution.',
+    required: false,
+    defaultValue: false,
+    visible: true,
+  };
 
-function rootUriOfConnection(connection: ?ServerConnection): string {
-  return connection == null ? '' : connection.getUriOfRemotePath('/');
-}
+  const debugTypeMessage = `using ${
+    vsAdapterType === VsAdapterTypes.NATIVE_GDB ? 'gdb' : 'lldb'
+  }`;
 
-function notifyOpenDebugSession(): void {
-  atom.notifications.addInfo(
-    "Received a remote debug request, but there's an open debug session already!",
-    {
-      detail:
-        'To be able to remote debug, please terminate your existing session',
+  const autoGenLaunchConfig: AutoGenLaunchConfig = {
+    launch: true,
+    vsAdapterType,
+    properties: [program, cwd, args, env, sourcePath, stopOnEntry, corePath],
+    scriptPropertyName: 'program',
+    cwdPropertyName: 'working directory',
+    header: <p>Debug native programs {debugTypeMessage}.</p>,
+    getProcessName(values) {
+      let processName = values.program;
+      const lastSlash = processName.lastIndexOf('/');
+      if (lastSlash >= 0) {
+        processName = processName.substring(lastSlash + 1, processName.length);
+      }
+      processName += ' (' + debugTypeMessage + ')';
+      return processName;
     },
-  );
-}
-export async function getPrepackLaunchProcessInfo(
-  scriptPath: NuclideUri,
-  prepackPath: string,
-  args: Array<string>,
-): Promise<VspProcessInfo> {
-  const adapterInfo = await getPrepackAdapterInfo(scriptPath);
-  return new VspProcessInfo(
-    scriptPath,
-    'launch',
-    VsAdapterTypes.PREPACK,
-    adapterInfo,
-    false,
-    getPrepackScriptConfig(scriptPath, prepackPath, args),
-  );
-}
+  };
 
-async function getPrepackAdapterInfo(
-  path: NuclideUri,
-): Promise<VSAdapterExecutableInfo> {
-  return getAdapterExecutableWithProperNode('prepack', path);
-}
-
-function getPrepackScriptConfig(
-  scriptPath: NuclideUri,
-  prepackPath: string,
-  args: Array<string>,
-): Object {
+  const pid = {
+    name: 'pid',
+    type: 'process',
+    description: '',
+    required: true,
+    visible: true,
+  };
+  const autoGenAttachConfig: AutoGenAttachConfig = {
+    launch: false,
+    vsAdapterType,
+    properties: [pid, sourcePath],
+    header: <p>Attach to a running native process {debugTypeMessage}</p>,
+    getProcessName(values) {
+      return 'Pid: ' + values.pid + ' (' + debugTypeMessage + ')';
+    },
+  };
   return {
-    sourceFile: nuclideUri.getPath(scriptPath),
-    prepackRuntime: prepackPath,
-    prepackArguments: args,
+    launch: autoGenLaunchConfig,
+    attach: autoGenAttachConfig,
   };
 }
 
-export async function getNodeLaunchProcessInfo(
-  scriptPath: NuclideUri,
-  nodePath: string,
-  args: Array<string>,
-  cwd: string,
-  env: Object,
-  outFiles: string,
-): Promise<VspProcessInfo> {
-  const adapterInfo = await getNodeAdapterInfo(scriptPath);
-  return new VspProcessInfo(
-    scriptPath,
-    'launch',
-    VsAdapterTypes.NODE,
-    adapterInfo,
-    false, // showThreads
-    getNodeScriptConfig(
-      scriptPath,
-      nodePath.length > 0 ? nodePath : adapterInfo.command,
-      cwd,
-      args,
-      env,
-      outFiles,
-    ),
-  );
-}
-
-export async function getOCamlLaunchProcessInfo(
-  targetUri: NuclideUri,
-  launchTarget: OCamlDebugStartInfo,
-): Promise<VspProcessInfo> {
-  const adapterInfo = await getAdapterExecutableWithProperNode(
-    'ocaml',
-    targetUri,
-  );
-  return new VspProcessInfo(
-    targetUri,
-    'launch',
-    VsAdapterTypes.OCAML,
-    adapterInfo,
-    false, // showThreads
-    {config: launchTarget},
-  );
-}
-
-export async function getGdbLaunchProcessInfo(
+export function getNativeVSPLaunchProcessConfig(
+  adapterType: VsAdapterType,
   program: NuclideUri,
-  args: Array<string>,
-  cwd: string,
-): Promise<VspProcessInfo> {
-  const adapterInfo = await getAdapterExecutableWithProperNode(
-    'native',
-    program,
-  );
-  return new VspProcessInfo(
-    program,
-    'launch',
-    VsAdapterTypes.NATIVE,
-    adapterInfo,
-    true, // showThreads
-    {program: nuclideUri.getPath(program), args, cwd},
-  );
-}
-
-export async function getGdbAttachProcessInfo(
-  targetUri: NuclideUri,
-  pid: number,
-): Promise<VspProcessInfo> {
-  const adapterInfo = await getAdapterExecutableWithProperNode(
-    'native',
-    targetUri,
-  );
-  return new VspProcessInfo(
-    targetUri,
-    'attach',
-    VsAdapterTypes.NATIVE,
-    adapterInfo,
-    true, // showThreads
-    {pid},
-  );
-}
-
-export async function getNodeAttachProcessInfo(
-  targetUri: NuclideUri,
-  port: number,
-): Promise<VspProcessInfo> {
-  const adapterInfo = await getNodeAdapterInfo(targetUri);
-  return new VspProcessInfo(
-    targetUri,
-    'attach',
-    VsAdapterTypes.NODE,
-    adapterInfo,
-    false, // showThreads
-    getAttachNodeConfig(port),
-  );
-}
-
-async function getNodeAdapterInfo(
-  path: NuclideUri,
-): Promise<VSAdapterExecutableInfo> {
-  return getAdapterExecutableWithProperNode('node', path);
-}
-
-function getNodeScriptConfig(
-  scriptPath: NuclideUri,
-  nodePath: string,
-  cwd: string,
-  args: Array<string>,
-  env: Object,
-  outFiles: string,
-): Object {
+  config: VspNativeDebuggerLaunchBuilderParms,
+): IProcessConfig {
   return {
-    protocol: 'inspector',
-    stopOnEntry: false,
-    program: nuclideUri.getPath(scriptPath),
-    runtimeExecutable: nodePath,
-    cwd,
-    args,
-    env,
-    outFiles: outFiles.length > 0 ? [outFiles] : [],
+    targetUri: program,
+    debugMode: 'launch',
+    adapterType,
+    config: {
+      program: nuclideUri.getPath(program),
+      ...config,
+    },
   };
 }
 
-export async function getReactNativeAttachProcessInfo(
-  args: ReactNativeAttachArgs,
-): Promise<VspProcessInfo> {
-  const adapterInfo = await getReactNativeAdapterInfo(args.program);
-  return new VspProcessInfo(
-    args.program,
-    'attach',
-    VsAdapterTypes.REACT_NATIVE,
-    adapterInfo,
-    false, // showThreads
-    args,
-  );
-}
-
-export async function getReactNativeLaunchProcessInfo(
-  args: ReactNativeLaunchArgs,
-): Promise<VspProcessInfo> {
-  const adapterInfo = await getReactNativeAdapterInfo(args.program);
-  return new VspProcessInfo(
-    args.program,
-    'launch',
-    VsAdapterTypes.REACT_NATIVE,
-    adapterInfo,
-    false, // showThreads
-    args,
-  );
-}
-
-async function getReactNativeAdapterInfo(
-  path: NuclideUri,
-): Promise<VSAdapterExecutableInfo> {
-  return getAdapterExecutableWithProperNode('react-native', path);
-}
-
-function getAttachNodeConfig(port: number): Object {
-  return {port};
-}
-
-export function listenToRemoteDebugCommands(): IDisposable {
-  const connections = ServerConnection.observeRemoteConnections()
-    .map(conns => new Set(conns))
-    .let(diffSets())
-    .flatMap(diff => Observable.from(diff.added))
-    .startWith(null);
-
-  const remoteDebuggerServices = connections.map(conn => {
-    const rootUri = rootUriOfConnection(conn);
-    const service = getRemoteDebuggerCommandServiceByNuclideUri(rootUri);
-
-    return {service, rootUri};
-  });
-
-  const delayStartupObservable = Observable.interval(
-    REMOTE_DEBUG_SERVICES_DELAYED_STARTUP_MS,
-  )
-    .first()
-    .ignoreElements();
-
-  return new UniversalDisposable(
-    delayStartupObservable
-      .switchMap(() => {
-        return remoteDebuggerServices.flatMap(({service, rootUri}) => {
-          return service
-            .observeAttachDebugTargets()
-            .refCount()
-            .map(targets => findDuplicateAttachTargetIds(targets));
-        });
-      })
-      .subscribe(duplicateTargetIds =>
-        notifyDuplicateDebugTargets(duplicateTargetIds),
-      ),
-    delayStartupObservable
-      .concat(remoteDebuggerServices)
-      .flatMap(({service, rootUri}) => {
-        return service
-          .observeRemoteDebugCommands()
-          .refCount()
-          .catch(error => {
-            if (!isRunningInTest()) {
-              getLogger().error(
-                'Failed to listen to remote debug commands - ' +
-                  'You could be running locally with two Atom windows. ' +
-                  `IsLocal: ${String(rootUri === '')}`,
-              );
-            }
-            return Observable.empty();
-          })
-          .map((command: RemoteDebugCommandRequest) => ({rootUri, command}));
-      })
-      .let(fastDebounce(500))
-      .subscribe(async ({rootUri, command}) => {
-        const attachProcessInfo = await getPythonAttachTargetProcessInfo(
-          rootUri,
-          command.target,
-        );
-        const debuggerService = await getDebuggerService();
-        const debuggerName = debuggerService.getCurrentDebuggerName();
-        if (debuggerName == null) {
-          track('fb-python-debugger-auto-attach');
-          debuggerService.startDebugging(attachProcessInfo);
-          return;
-        } else {
-          notifyOpenDebugSession();
-          return;
-        }
-        // Otherwise, we're already debugging that target.
-      }),
-  );
-}
-
-let shouldNotifyDuplicateTargets = true;
-let duplicateTargetsNotification;
-
-function notifyDuplicateDebugTargets(duplicateTargetIds: Set<string>): void {
-  if (
-    duplicateTargetIds.size > 0 &&
-    shouldNotifyDuplicateTargets &&
-    duplicateTargetsNotification == null
-  ) {
-    const formattedIds = Array.from(duplicateTargetIds).join(', ');
-    duplicateTargetsNotification = atom.notifications.addInfo(
-      `Debugger: duplicate attach targets: \`${formattedIds}\``,
-      {
-        buttons: [
-          {
-            onDidClick: () => {
-              shouldNotifyDuplicateTargets = false;
-              if (duplicateTargetsNotification != null) {
-                duplicateTargetsNotification.dismiss();
-              }
-            },
-            text: 'Ignore',
-          },
-        ],
-        description:
-          `Nuclide debugger detected duplicate attach targets with ids (${formattedIds}) ` +
-          'That could be instagram running multiple processes - check out https://our.intern.facebook.com/intern/dex/instagram-server/debugging-with-nuclide/',
-        dismissable: true,
-      },
-    );
-    duplicateTargetsNotification.onDidDismiss(() => {
-      duplicateTargetsNotification = null;
-    });
-  }
-}
-
-function findDuplicateAttachTargetIds(
-  targets: Array<PythonDebuggerAttachTarget>,
-): Set<string> {
-  const targetIds = new Set();
-  const duplicateTargetIds = new Set();
-  targets.forEach(target => {
-    const {id} = target;
-    if (id == null) {
-      return;
-    }
-    if (targetIds.has(id)) {
-      duplicateTargetIds.add(id);
-    } else {
-      targetIds.add(id);
-    }
-  });
-  return duplicateTargetIds;
+export function getNativeVSPAttachProcessConfig(
+  adapterType: VsAdapterType,
+  targetUri: NuclideUri,
+  config: VspNativeDebuggerAttachBuilderParms,
+): IProcessConfig {
+  return {
+    targetUri,
+    debugMode: 'attach',
+    adapterType,
+    config,
+  };
 }

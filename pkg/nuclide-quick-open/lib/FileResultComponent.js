@@ -15,7 +15,7 @@ import * as React from 'react';
 import matchIndexesToRanges from 'nuclide-commons/matchIndexesToRanges';
 import nuclideUri from 'nuclide-commons/nuclideUri';
 import HighlightedText from 'nuclide-commons-ui/HighlightedText';
-import PathWithFileIcon from '../../nuclide-ui/PathWithFileIcon';
+import PathWithFileIcon from 'nuclide-commons-ui/PathWithFileIcon';
 
 export default class FileResultComponent {
   static getComponentForItem(
@@ -28,7 +28,9 @@ export default class FileResultComponent {
     let matchIndexes = item.matchIndexes || [];
     if (filePath.startsWith(dirName)) {
       filePath = '.' + filePath.slice(dirName.length);
-      matchIndexes = matchIndexes.map(i => i - (dirName.length - 1));
+      matchIndexes = matchIndexes
+        .map(i => i - (dirName.length - 1))
+        .filter(i => i >= 0);
     }
 
     return (

@@ -5,14 +5,17 @@
  * This source code is licensed under the license found in the LICENSE file in
  * the root directory of this source tree.
  *
- * @flow
+ * @flow strict-local
  * @format
  */
 
 import type {Subscription} from 'rxjs';
 import typeof * as ClangProcessService from './ClangProcessService';
 import type {ClangCompileResult} from './rpc-types';
-import type {ClangServerArgs} from './find-clang-server-args';
+import type {
+  ClangServerArgs,
+  PartialClangServerArgs,
+} from './find-clang-server-args';
 
 import fsPromise from 'nuclide-commons/fsPromise';
 import nuclideUri from 'nuclide-commons/nuclideUri';
@@ -24,6 +27,7 @@ import {spawn} from 'nuclide-commons/process';
 import {RpcProcess} from '../../nuclide-rpc';
 import {ServiceRegistry, loadServicesConfig} from '../../nuclide-rpc';
 import {watchWithNode} from '../../nuclide-filewatcher-rpc';
+import {VENDOR_PYTHONPATH} from './find-clang-server-args';
 
 export type ClangServerStatus =
   | 'finding_flags'
@@ -48,15 +52,15 @@ function getServiceRegistry(): ServiceRegistry {
  * If the compilation flags provide an absolute Clang path, and that Clang path
  * contains an actual libclang.so, then use that first.
  */
-async function getLibClangFromFlags(
+async function getLibClangOverrideFromFlags(
   flagsData: ?ClangServerFlags,
-): Promise<?string> {
+): Promise<PartialClangServerArgs> {
   if (
     flagsData == null ||
     flagsData.flags == null ||
     flagsData.flags.length === 0
   ) {
-    return null;
+    return {};
   }
   const clangPath = flagsData.flags[0];
   if (nuclideUri.isAbsolute(clangPath)) {
@@ -65,10 +69,20 @@ async function getLibClangFromFlags(
       '../lib/libclang.so',
     );
     if (libClangPath != null && (await fsPromise.exists(libClangPath))) {
-      return libClangPath;
+      const realLibClangPath = await fsPromise.realpath(libClangPath);
+      const derivedPythonPath = nuclideUri.join(
+        realLibClangPath,
+        '../../../../src/llvm/tools/clang/bindings/python',
+      );
+      return {
+        libClangLibraryFile: realLibClangPath,
+        pythonPathEnv: (await fsPromise.exists(derivedPythonPath))
+          ? derivedPythonPath
+          : VENDOR_PYTHONPATH,
+      };
     }
   }
-  return null;
+  return {};
 }
 
 function spawnClangProcess(
@@ -80,9 +94,9 @@ function spawnClangProcess(
     Promise.all([
       serverArgsPromise,
       flagsPromise,
-      flagsPromise.then(getLibClangFromFlags),
+      flagsPromise.then(getLibClangOverrideFromFlags),
     ]),
-  ).switchMap(([serverArgs, flagsData, libClangFromFlags]) => {
+  ).switchMap(([serverArgs, flagsData, flagOverrides]) => {
     const flags = idx(flagsData, _ => _.flags);
     if (flags == null) {
       // We're going to reject here.
@@ -97,8 +111,9 @@ function spawnClangProcess(
     const argsFd = 3;
     const args = [pathToLibClangServer, '--flags-from-pipe', `${argsFd}`];
     const libClangLibraryFile =
-      // flowlint-next-line sketchy-null-string:off
-      libClangFromFlags || serverArgs.libClangLibraryFile;
+      flagOverrides.libClangLibraryFile != null
+        ? flagOverrides.libClangLibraryFile
+        : serverArgs.libClangLibraryFile;
     if (libClangLibraryFile != null) {
       args.push('--libclang-file', libClangLibraryFile);
     }
@@ -109,7 +124,11 @@ function spawnClangProcess(
       stdio: [null, null, null, 'pipe'], // check argsFd
       detached: false, // When Atom is killed, clang_server.py should be killed, too.
       env: {
-        PYTHONPATH: pythonPathEnv,
+        ...process.env,
+        PYTHONPATH:
+          flagOverrides.pythonPathEnv != null
+            ? flagOverrides.pythonPathEnv
+            : pythonPathEnv,
       },
     };
 

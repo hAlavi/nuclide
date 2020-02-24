@@ -12,7 +12,7 @@
 import {onDidRemoveProjectPath} from 'nuclide-commons-atom/projects';
 import {isValidTextEditor} from 'nuclide-commons-atom/text-editor';
 import {NavigationStackController} from './NavigationStackController';
-import {trackTiming} from '../../nuclide-analytics';
+import {trackTiming} from 'nuclide-analytics';
 import UniversalDisposable from 'nuclide-commons/UniversalDisposable';
 import {observeNavigatingEditors} from 'nuclide-commons-atom/go-to-location';
 import createPackage from 'nuclide-commons-atom/createPackage';
@@ -37,36 +37,24 @@ class Activation {
     this._disposables = new UniversalDisposable();
 
     const subscribeEditor = (editor: atom$TextEditor) => {
-      const destroySubscription = editor.onDidDestroy(() => {
-        controller.onDestroy(editor);
-        this._disposables.remove(destroySubscription);
-      });
-      this._disposables.add(destroySubscription);
+      this._disposables.addUntilDestroyed(
+        editor,
+        editor.onDidDestroy(() => {
+          controller.onDestroy(editor);
+        }),
+        editor.onDidChangeCursorPosition(event => {
+          controller.updatePosition(editor, event.newBufferPosition);
+        }),
+      );
     };
-
-    let lastActiveEditor: ?atom$TextEditor;
 
     const addEditor = (addEvent: AddTextEditorEvent) => {
       const editor = addEvent.textEditor;
       if (isValidTextEditor(editor)) {
         subscribeEditor(editor);
-        updateLastEditor(editor);
         controller.onCreate(editor);
       }
     };
-
-    function updateLastEditor(editor: atom$TextEditor) {
-      if (editor === lastActiveEditor) {
-        return;
-      }
-      if (lastActiveEditor != null && !lastActiveEditor.isDestroyed()) {
-        controller.updatePosition(
-          lastActiveEditor,
-          lastActiveEditor.getCursorBufferPosition(),
-        );
-      }
-      lastActiveEditor = editor;
-    }
 
     atom.workspace.getTextEditors().forEach(subscribeEditor);
     this._disposables.add(
@@ -74,7 +62,6 @@ class Activation {
         if (!isValidTextEditor(item)) {
           return;
         }
-        updateLastEditor((item: any));
         controller.onActivate((item: any));
       }),
       atom.workspace.onDidAddTextEditor(addEditor),

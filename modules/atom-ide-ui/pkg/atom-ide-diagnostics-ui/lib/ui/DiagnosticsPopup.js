@@ -11,11 +11,16 @@
  */
 
 import type {NuclideUri} from 'nuclide-commons/nuclideUri';
-import type {DiagnosticMessage} from '../../../atom-ide-diagnostics/lib/types';
+import type {
+  DiagnosticMessage,
+  CodeActionsState,
+  DescriptionsState,
+} from '../../../atom-ide-diagnostics/lib/types';
 import type {CodeAction} from '../../../atom-ide-code-actions/lib/types';
 
 import * as React from 'react';
 import classnames from 'classnames';
+import analytics from 'nuclide-commons/analytics';
 import {mapUnion} from 'nuclide-commons/collection';
 import {DiagnosticsMessage} from './DiagnosticsMessage';
 import DiagnosticsCodeActions from './DiagnosticsCodeActions';
@@ -24,13 +29,16 @@ type DiagnosticsPopupProps = {
   messages: Array<DiagnosticMessage>,
   goToLocation: (filePath: NuclideUri, line: number) => mixed,
   fixer: (message: DiagnosticMessage) => void,
-  codeActionsForMessage?: Map<DiagnosticMessage, Map<string, CodeAction>>,
+  codeActionsForMessage?: CodeActionsState,
+  descriptions?: DescriptionsState,
+  style: ?Object,
 };
 
 function renderMessage(
   fixer: (message: DiagnosticMessage) => void,
   goToLocation: (filePath: NuclideUri, line: number) => mixed,
-  codeActionsForMessage: ?Map<DiagnosticMessage, Map<string, CodeAction>>,
+  codeActionsForMessage: ?CodeActionsState,
+  descriptions: ?DescriptionsState,
   message: DiagnosticMessage,
   index: number,
 ): React.Element<any> {
@@ -42,15 +50,18 @@ function renderMessage(
       'diagnostics-popup-error': message.type === 'Error',
       'diagnostics-popup-warning': message.type === 'Warning',
       'diagnostics-popup-info': message.type === 'Info',
+      'diagnostics-popup-hint': message.type === 'Hint',
     },
   );
   const codeActions = getCodeActions(message, codeActionsForMessage);
+  const description = getDescription(message, descriptions);
   return (
     <div className={className} key={index} tabIndex={-1}>
       <DiagnosticsMessage
         fixer={fixer}
         goToLocation={goToLocation}
-        message={message}>
+        message={message}
+        description={description}>
         {codeActions && codeActions.size ? (
           <DiagnosticsCodeActions codeActions={codeActions} />
         ) : null}
@@ -61,7 +72,7 @@ function renderMessage(
 
 function getCodeActions(
   message: DiagnosticMessage,
-  codeActionsForMessage: ?Map<DiagnosticMessage, Map<string, CodeAction>>,
+  codeActionsForMessage: ?CodeActionsState,
 ): ?Map<string, CodeAction> {
   const codeActionMaps = [];
   if (message.actions != null && message.actions.length > 0) {
@@ -93,14 +104,47 @@ function getCodeActions(
   return codeActionMaps.length > 0 ? mapUnion(...codeActionMaps) : null;
 }
 
+function getDescription(
+  message: DiagnosticMessage,
+  descriptions: ?DescriptionsState,
+): string {
+  if (descriptions) {
+    return descriptions.get(message) || '';
+  }
+  return '';
+}
+
 // TODO move LESS styles to nuclide-ui
-export const DiagnosticsPopup = (props: DiagnosticsPopupProps) => {
-  const {fixer, goToLocation, codeActionsForMessage, messages, ...rest} = props;
-  return (
-    <div className="diagnostics-popup" {...rest}>
-      {messages.map(
-        renderMessage.bind(null, fixer, goToLocation, codeActionsForMessage),
-      )}
-    </div>
-  );
-};
+export class DiagnosticsPopup extends React.Component<DiagnosticsPopupProps> {
+  componentDidMount() {
+    analytics.track('diagnostics-show-popup', {
+      // Note: there could be multiple providers here (but it's less common).
+      providerName: this.props.messages[0].providerName,
+    });
+  }
+
+  render() {
+    const {
+      fixer,
+      goToLocation,
+      codeActionsForMessage,
+      descriptions,
+      messages,
+      ...rest
+    } = this.props;
+    return (
+      <div className="diagnostics-popup" {...rest}>
+        {messages.map((msg, index) =>
+          renderMessage(
+            fixer,
+            goToLocation,
+            codeActionsForMessage,
+            descriptions,
+            msg,
+            index,
+          ),
+        )}
+      </div>
+    );
+  }
+}

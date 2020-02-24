@@ -24,7 +24,15 @@ import {Observable} from 'rxjs';
 import {WatchmanClient} from 'nuclide-watchman-helpers';
 import ExportCache from './ExportCache';
 
-const TO_IGNORE = ['**/node_modules/**', '**/VendorLib/**', '**/flow-typed/**'];
+// prettier-ignore
+const TO_IGNORE = [
+  '**/node_modules/**',
+  '**/VendorLib/**',
+  '**/flow-typed/**',
+  // @fb-only: '**/*react.proton.js',
+  // @fb-only: '**/html/shared/react/*-dev.js',
+  // @fb-only: '**/html/shared/react/*-prod.js',
+];
 
 export type FileWithHash = {
   // All files in the index will be relative to the given root.
@@ -146,7 +154,12 @@ function watchmanListFiles(
   return client
     .listFiles(root, getWatchmanExpression(root, pattern))
     .then((files: Array<any>) =>
-      files.map(data => ({name: data.name, sha1: data['content.sha1hex']})),
+      files.map(data => {
+        // content.sha1hex may be an object with an "error" property
+        // if getting the sha1 of the file contents fails.
+        const sha1: mixed = data['content.sha1hex'];
+        return {name: data.name, sha1: typeof sha1 === 'string' ? sha1 : null};
+      }),
     );
 }
 
@@ -154,9 +167,10 @@ async function getMainFiles(
   root: string,
   packageJsons: Array<string>,
 ): Promise<Map<string, string>> {
+  const cpus = os.cpus();
   const results = await asyncLimit(
     packageJsons,
-    os.cpus().length,
+    cpus ? Math.max(1, cpus.length) : 1,
     async packageJson => {
       try {
         const fullPath = nuclideUri.join(root, packageJson);

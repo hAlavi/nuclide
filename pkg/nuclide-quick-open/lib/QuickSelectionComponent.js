@@ -10,7 +10,7 @@
  */
 
 import type {NuclideUri} from 'nuclide-commons/nuclideUri';
-import type {Tab} from '../../nuclide-ui/Tabs';
+import type {Tab} from 'nuclide-commons-ui/Tabs';
 import type QuickSelectionActions from './QuickSelectionActions';
 
 import type {FileResult, ProviderResult} from './types';
@@ -44,12 +44,12 @@ import {AtomInput} from 'nuclide-commons-ui/AtomInput';
 import {Button} from 'nuclide-commons-ui/Button';
 import {Icon} from 'nuclide-commons-ui/Icon';
 import {scrollIntoViewIfNeeded} from 'nuclide-commons-ui/scrollIntoView';
-import Tabs from '../../nuclide-ui/Tabs';
+import Tabs from 'nuclide-commons-ui/Tabs';
 import {Badge, BadgeSizes} from '../../nuclide-ui/Badge';
 import UniversalDisposable from 'nuclide-commons/UniversalDisposable';
 import {observableFromSubscribeFunction} from 'nuclide-commons/event';
 import humanizeKeystroke from 'nuclide-commons/humanizeKeystroke';
-import {fastDebounce, throttle, microtask} from 'nuclide-commons/observable';
+import {fastDebounce, microtask} from 'nuclide-commons/observable';
 import * as React from 'react';
 import ReactDOM from 'react-dom';
 import classnames from 'classnames';
@@ -82,6 +82,9 @@ type Props = {|
     selections: Array<ProviderResult>,
     providerName: string,
     query: string,
+    // selectionIndex will be null iff for cases where more than one selection
+    // is made at once (i.e. when the user hits "Open All")
+    selectionIndex: ?number,
   ) => void,
   onItemsChanged?: (newItems: GroupedResults) => void,
   onSelectionChanged?: (
@@ -102,7 +105,7 @@ type State = {
   initialQuery: string,
 };
 
-export default class QuickSelectionComponent extends React.Component<
+export default class QuickSelectionComponent extends React.PureComponent<
   Props,
   State,
 > {
@@ -161,7 +164,7 @@ export default class QuickSelectionComponent extends React.Component<
   /**
    * Private API
    */
-  componentWillReceiveProps(nextProps: Props): void {
+  UNSAFE_componentWillReceiveProps(nextProps: Props): void {
     // Prevent clowniness:
     if (this.props.searchResultManager !== nextProps.searchResultManager) {
       throw new Error('quick-open: searchResultManager instance changed.');
@@ -255,7 +258,7 @@ export default class QuickSelectionComponent extends React.Component<
         nullthrows(this._queryInput).onDidChange(cb),
       )
         .startWith(null)
-        .let(throttle(microtask, {leading: false}))
+        .audit(() => microtask)
         .subscribe(this._handleTextInputChange),
       observableFromSubscribeFunction(cb =>
         this.props.searchResultManager.onProvidersChanged(cb),
@@ -413,7 +416,12 @@ export default class QuickSelectionComponent extends React.Component<
     } else {
       const providerName = this.props.searchResultManager.getActiveProviderName();
       const query = this._getTextEditor().getText();
-      this.props.onSelection([selectedItem], providerName, query);
+      this.props.onSelection(
+        [selectedItem],
+        providerName,
+        query,
+        this.state.selectedItemIndex,
+      );
     }
   };
 
@@ -726,7 +734,7 @@ export default class QuickSelectionComponent extends React.Component<
     const selections = flattenResults(this.state.resultsByService);
     const providerName = this.props.searchResultManager.getActiveProviderName();
     const query = this._getTextEditor().getText();
-    this.props.onSelection(selections, providerName, query);
+    this.props.onSelection(selections, providerName, query, null);
   }
 
   render(): React.Node {
@@ -791,7 +799,7 @@ export default class QuickSelectionComponent extends React.Component<
                   })}
                   key={serviceName + dirName + itemIndex}
                   onMouseDown={this._select}
-                  onMouseEnter={this._setSelectedIndex.bind(
+                  onMouseMove={this._setSelectedIndex.bind(
                     this,
                     serviceName,
                     dirName,

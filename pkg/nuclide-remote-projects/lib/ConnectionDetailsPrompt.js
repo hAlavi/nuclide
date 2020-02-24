@@ -5,7 +5,7 @@
  * This source code is licensed under the license found in the LICENSE file in
  * the root directory of this source tree.
  *
- * @flow
+ * @flow strict-local
  * @format
  */
 
@@ -16,9 +16,11 @@ import type {
   NuclideRemoteConnectionParamsWithPassword,
   NuclideRemoteConnectionProfile,
 } from './connection-types';
+import type {HumanizedErrorMessage} from './notification';
 
 import addTooltip from 'nuclide-commons-ui/addTooltip';
 import classnames from 'classnames';
+import {Message} from 'nuclide-commons-ui/Message';
 import nullthrows from 'nullthrows';
 import ConnectionDetailsForm from './ConnectionDetailsForm';
 import {getIPsForHosts} from './connection-profile-utils';
@@ -26,6 +28,7 @@ import {getUniqueHostsForProfiles} from './connection-profile-utils';
 import {HR} from 'nuclide-commons-ui/HR';
 import {MutableListSelector} from '../../nuclide-ui/MutableListSelector';
 import * as React from 'react';
+import marked from 'marked';
 
 type Props = {
   // The initial list of connection profiles that will be displayed.
@@ -48,6 +51,8 @@ type Props = {
   // The user's intent is to delete the currently-selected profile.
   onDeleteProfileClicked: (selectedProfileIndex: number) => mixed,
   onProfileClicked: (selectedProfileIndex: number) => mixed,
+
+  error: ?HumanizedErrorMessage,
 };
 
 type State = {
@@ -235,6 +240,7 @@ export default class ConnectionDetailsPrompt extends React.Component<
               onDoubleClick={this.props.onConfirm}>
               <span
                 className="icon icon-info pull-right connection-details-icon-info"
+                // eslint-disable-next-line nuclide-internal/jsx-simple-callback-refs
                 ref={addTooltip({
                   // Intentionally *not* an arrow function so the jQuery Tooltip plugin can set the
                   // context to the Tooltip instance.
@@ -287,6 +293,7 @@ export default class ConnectionDetailsPrompt extends React.Component<
         <span
           style={{paddingLeft: 10}}
           className="icon icon-info pull-right nuclide-remote-projects-tooltip-warning"
+          // eslint-disable-next-line nuclide-internal/jsx-simple-callback-refs
           ref={addTooltip({
             // Intentionally *not* an arrow function so the jQuery
             // Tooltip plugin can set the context to the Tooltip
@@ -323,28 +330,75 @@ export default class ConnectionDetailsPrompt extends React.Component<
             onDeleteButtonClicked={this._onDeleteProfileClicked}
           />
         </div>
-        <ConnectionDetailsForm
-          className="nuclide-remote-projects-connection-details"
-          initialUsername={prefilledConnectionParams.username}
-          initialServer={prefilledConnectionParams.server}
-          initialRemoteServerCommand={
-            prefilledConnectionParams.remoteServerCommand
-          }
-          initialCwd={prefilledConnectionParams.cwd}
-          initialSshPort={prefilledConnectionParams.sshPort}
-          initialPathToPrivateKey={prefilledConnectionParams.pathToPrivateKey}
-          initialAuthMethod={prefilledConnectionParams.authMethod}
-          initialDisplayTitle={prefilledConnectionParams.displayTitle}
-          profileHosts={uniqueHosts}
-          onConfirm={this.props.onConfirm}
-          onCancel={this.props.onCancel}
-          onDidChange={this._handleConnectionDetailsFormDidChange}
-          needsPasswordValue={true}
-          ref={form => {
-            this._connectionDetailsForm = form;
-          }}
-        />
+        <div className="nuclide-remote-projects-connection-details">
+          <ErrorMessage error={this.props.error} />
+          <ConnectionDetailsForm
+            initialUsername={prefilledConnectionParams.username}
+            initialServer={prefilledConnectionParams.server}
+            initialRemoteServerCommand={
+              prefilledConnectionParams.remoteServerCommand
+            }
+            initialCwd={prefilledConnectionParams.cwd}
+            initialSshPort={prefilledConnectionParams.sshPort}
+            initialPathToPrivateKey={prefilledConnectionParams.pathToPrivateKey}
+            initialAuthMethod={prefilledConnectionParams.authMethod}
+            initialDisplayTitle={prefilledConnectionParams.displayTitle}
+            profileHosts={uniqueHosts}
+            onConfirm={this.props.onConfirm}
+            onCancel={this.props.onCancel}
+            onDidChange={this._handleConnectionDetailsFormDidChange}
+            needsPasswordValue={true}
+            ref={form => {
+              this._connectionDetailsForm = form;
+            }}
+          />
+        </div>
       </div>
     );
   }
+}
+
+function ErrorMessage(props: {error: ?HumanizedErrorMessage}) {
+  const {error} = props;
+  if (error == null) {
+    return null;
+  }
+
+  const title =
+    error.title == null ? 'An unexpected error occurred.' : error.title;
+  return (
+    <Message
+      type="error"
+      className="nuclide-remote-projects-connection-error-message">
+      <span className="nuclide-remote-projects-connection-error-message-title">
+        {title}
+      </span>
+      <TroubleshootingTips detail={error.body} />
+    </Message>
+  );
+}
+
+class TroubleshootingTips extends React.Component<{detail: ?string}> {
+  render() {
+    if (this.props.detail == null) {
+      return null;
+    }
+
+    return (
+      <span
+        ref={this._addTooltip}
+        className="nuclide-remote-projects-error-troubleshooting-tips">
+        Troubleshooting Tips
+      </span>
+    );
+  }
+
+  _addTooltip = el => {
+    const formattedDetail = marked(nullthrows(this.props.detail));
+    addTooltip({
+      title: `<div class="nuclide-remote-projects-connection-error-message-tooltip-body">${formattedDetail}</div>`,
+      placement: 'bottom',
+      delay: 0,
+    })(el);
+  };
 }

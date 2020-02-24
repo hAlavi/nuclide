@@ -12,13 +12,20 @@
 
 import type {AgentOptions} from '../../common/types';
 
+import invariant from 'assert';
 import request from 'request';
+import https from 'https';
+import http from 'http';
+import url from 'url';
+import passesGK from 'nuclide-commons/passesGK';
 
 export type RequestOptions = {
   uri: string,
+  method?: string,
   agentOptions?: AgentOptions,
   useQuerystring?: boolean,
   timeout?: number,
+  body?: string,
 };
 
 export type ResponseBody = {body: string, response: HttpResponse};
@@ -32,20 +39,24 @@ type HttpResponse = {statusCode: number};
  * the option:
  * {useQuerystring: false}
  */
-export default function asyncRequest(
+export default (async function asyncRequest(
   options: RequestOptions,
 ): Promise<ResponseBody> {
+  const useNodeRequest = await passesGK('bigdig_node_http_request');
+
   return new Promise((resolve, reject) => {
     if (options.useQuerystring === undefined) {
       options.useQuerystring = true;
     }
-    // TODO(t8118670): This can cause an uncaught exception.
-    // Likely requires a fix to 'request'.
-    request(options, (error, response, body) => {
+
+    const handleResponse = (error, response, body) => {
       if (error) {
         reject(error);
-      } else if (response.statusCode < 200 || response.statusCode >= 300) {
-        let errorJson = body;
+      } else if (
+        response != null &&
+        (response.statusCode < 200 || response.statusCode >= 300)
+      ) {
+        let errorJson = {};
         if (typeof body !== 'object') {
           try {
             errorJson = JSON.parse(body);
@@ -60,8 +71,57 @@ export default function asyncRequest(
         err.code = errorJson.code || response.statusCode;
         reject(err);
       } else {
+        invariant(body != null);
+        invariant(response != null);
         resolve({body, response});
       }
+    };
+
+    if (useNodeRequest) {
+      nodeRequest(options, handleResponse);
+    } else {
+      request(options, handleResponse);
+    }
+  });
+});
+
+// TODO support IPv6 support T36867827/T36962554 for all cases
+function nodeRequest(opts: RequestOptions, cb) {
+  const parsedUri = url.parse(opts.uri);
+  const agentOptions = opts.agentOptions;
+
+  const options = {
+    host: parsedUri.hostname,
+    port: parsedUri.port,
+    path: parsedUri.pathname,
+    method: opts.method,
+    timeout: opts.timeout,
+    cert: agentOptions ? agentOptions.cert : undefined,
+    key: agentOptions ? agentOptions.key : undefined,
+    ca: agentOptions ? agentOptions.ca : undefined,
+  };
+
+  let requestMethod = https.request;
+
+  if (parsedUri.protocol != null && parsedUri.protocol.match(/http:/)) {
+    requestMethod = http.request;
+  }
+
+  const req = requestMethod(options, res => {
+    let body = '';
+
+    res.on('data', d => {
+      body += d;
+    });
+
+    res.on('end', () => {
+      cb(null, res, body);
     });
   });
+
+  req.on('error', err => {
+    cb(err, null, null);
+  });
+
+  req.end(opts.body);
 }

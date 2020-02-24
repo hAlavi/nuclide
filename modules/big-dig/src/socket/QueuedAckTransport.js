@@ -17,7 +17,7 @@ import {default as Deque} from 'double-ended-queue';
 import invariant from 'assert';
 import {Subject} from 'rxjs';
 import {getLogger} from 'log4js';
-const logger = getLogger('nuclide-server');
+const logger = getLogger('reliable-socket');
 import {Emitter} from 'event-kit';
 
 export const ACK_BUFFER_TIME = 100;
@@ -97,7 +97,9 @@ export class QueuedAckTransport {
     this._checkLeaks();
     return this._isClosed
       ? 'closed'
-      : this._transport == null ? 'disconnected' : 'open';
+      : this._transport == null
+        ? 'disconnected'
+        : 'open';
   }
 
   onDisconnect(
@@ -117,6 +119,7 @@ export class QueuedAckTransport {
 
     this._transport = transport;
 
+    // eslint-disable-next-line nuclide-internal/unused-subscription
     transport.onMessage().subscribe(this._handleMessage.bind(this));
     transport.onClose(() => this._handleTransportClose(transport));
   }
@@ -318,12 +321,23 @@ export class QueuedAckTransport {
     this._cancelAckTimer();
     if (this._lastProcessedId > 0) {
       this._transportSend(frameAck(this._lastProcessedId));
+      // It seems that a bug in Electron's Node integration can cause ACKs
+      // to become stuck in the Node event loop indefinitely
+      // (as they are scheduled using Chromium's setTimeout).
+      // See T27348369 for more details.
+      if (
+        process.platform === 'win32' &&
+        // $FlowFixMe(>=0.68.0) Flow suppress (T27187857)
+        typeof process.activateUvLoop === 'function'
+      ) {
+        process.activateUvLoop();
+      }
     }
   }
 
   // If we have a pending send or receive and wait a while without
   // an ack or processing a message, disconnect.  This should trigger
-  // NuclideSocket on the client to attempt to reconnect.
+  // ReliableSocket on the client to attempt to reconnect.
   _maybeStartPendingMessageTimer(): void {
     if (this._pendingMessageTimer == null && this._wantsPendingMessageTimer()) {
       this._pendingMessageTimer = setTimeout(

@@ -5,7 +5,7 @@
  * This source code is licensed under the license found in the LICENSE file in
  * the root directory of this source tree.
  *
- * @flow
+ * @flow strict-local
  * @format
  */
 
@@ -26,15 +26,19 @@ import type {
   SetDeviceTypeComponentsAction,
   ToggleDevicePollingAction,
   ToggleProcessPollingAction,
+} from '../types';
+import type {
   Device,
   Process,
   ProcessTask,
   AppInfoRow,
   DeviceTypeComponent,
-} from '../types';
-import type {Expected} from '../../../commons-node/expected';
+  ComponentPosition,
+  Task,
+} from 'nuclide-debugger-common/types';
+import type {Expected} from 'nuclide-commons/expected';
 
-import {DeviceTask} from '../DeviceTask';
+import * as Immutable from 'immutable';
 
 export const SET_DEVICE_TYPES = 'SET_DEVICE_TYPES';
 export const SET_DEVICE_TYPE = 'SET_DEVICE_TYPE';
@@ -147,7 +151,7 @@ export function setDevice(device: ?Device): SetDeviceAction {
 }
 
 export function setDeviceTasks(
-  deviceTasks: DeviceTask[],
+  deviceTasks: Map<string, Array<Task>>,
 ): SetDeviceTasksAction {
   return {
     type: SET_DEVICE_TASKS,
@@ -156,7 +160,7 @@ export function setDeviceTasks(
 }
 
 export function setDeviceTypeTasks(
-  deviceTypeTasks: DeviceTask[],
+  deviceTypeTasks: Array<Task>,
 ): SetDeviceTypeTasksAction {
   return {
     type: SET_DEVICE_TYPE_TASKS,
@@ -165,7 +169,10 @@ export function setDeviceTypeTasks(
 }
 
 export function setDeviceTypeComponents(
-  components: Array<DeviceTypeComponent>,
+  components: Immutable.Map<
+    ComponentPosition,
+    Immutable.List<DeviceTypeComponent>,
+  >,
 ): SetDeviceTypeComponentsAction {
   return {type: SET_DEVICE_TYPE_COMPONENTS, payload: {components}};
 }

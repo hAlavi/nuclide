@@ -10,44 +10,32 @@
  */
 
 import UniversalDisposable from 'nuclide-commons/UniversalDisposable';
-import {observeTextEditors} from 'nuclide-commons-atom/text-editor';
 import FileWatcher from './FileWatcher';
 
 let subscriptions: ?UniversalDisposable = null;
-let watchers: ?Map<any, any> = null;
 
 export function activate(state: ?Object): void {
   const _subscriptions = new UniversalDisposable();
-  const _watchers = new Map();
+  const _watchers = new WeakSet();
 
   _subscriptions.add(
-    observeTextEditors(editor => {
+    atom.workspace.observeTextEditors(editor => {
       if (_watchers.has(editor)) {
         return;
       }
 
       const fileWatcher = new FileWatcher(editor);
-      _watchers.set(editor, fileWatcher);
-
-      _subscriptions.add(
-        editor.onDidDestroy(() => {
-          fileWatcher.destroy();
-          _watchers.delete(editor);
-        }),
-      );
+      _watchers.add(editor);
+      _subscriptions.addUntilDestroyed(editor, () => fileWatcher.destroy());
     }),
   );
 
-  watchers = _watchers;
   subscriptions = _subscriptions;
 }
 
 export function deactivate(): void {
-  if (subscriptions == null || watchers == null) {
+  if (subscriptions == null) {
     return;
-  }
-  for (const fileWatcher of watchers.values()) {
-    fileWatcher.destroy();
   }
   subscriptions.dispose();
   subscriptions = null;

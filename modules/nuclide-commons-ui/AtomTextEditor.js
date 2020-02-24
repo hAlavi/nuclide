@@ -13,16 +13,16 @@
 import invariant from 'assert';
 import classnames from 'classnames';
 import * as React from 'react';
-import semver from 'semver';
 import {TextBuffer} from 'atom';
 import {
   enforceReadOnlyEditor,
   enforceSoftWrap,
 } from 'nuclide-commons-atom/text-editor';
 import UniversalDisposable from 'nuclide-commons/UniversalDisposable';
+import {Observable} from 'rxjs';
+import atomTabIndexForwarder from './atomTabIndexForwarder';
 
 const doNothing = () => {};
-const ATOM_VERSION_CHECK_FOR_SET_GRAMMAR = '1.24.0-beta0';
 
 type TextEditorSetup = {
   disposables: IDisposable,
@@ -53,9 +53,7 @@ function setupTextEditor(props: Props): TextEditorSetup {
   disposables.add(() => textEditor.destroy());
   if (props.grammar != null) {
     textEditor.setGrammar(props.grammar);
-  } else if (
-    semver.gte(atom.getVersion(), ATOM_VERSION_CHECK_FOR_SET_GRAMMAR)
-  ) {
+  } else {
     atom.grammars.autoAssignLanguageMode(textBuffer);
   }
   disposables.add(enforceSoftWrap(textEditor, props.softWrapped));
@@ -67,11 +65,6 @@ function setupTextEditor(props: Props): TextEditorSetup {
 
   if (props.readOnly) {
     enforceReadOnlyEditor(textEditor);
-
-    // Remove the cursor line decorations because that's distracting in read-only mode.
-    textEditor.getDecorations({class: 'cursor-line'}).forEach(decoration => {
-      decoration.destroy();
-    });
   }
   return {
     disposables,
@@ -100,13 +93,13 @@ type Props = {
   grammar?: ?Object,
   // these are processed in setupTextEditor below
   /* eslint-disable react/no-unused-prop-types */
-  onDidTextBufferChange?: (event: atom$AggregatedTextEditEvent) => mixed,
+  onDidTextBufferChange?: ?(event: atom$AggregatedTextEditEvent) => mixed,
   path?: string,
   placeholderText?: string,
+  syncTextContents: boolean,
   /* eslint-enable react/no-unused-prop-types */
   readOnly: boolean,
   textBuffer?: TextBuffer,
-  syncTextContents: boolean,
   tabIndex: string,
   softWrapped: boolean,
   onConfirm?: () => mixed,
@@ -154,6 +147,23 @@ export class AtomTextEditor extends React.Component<Props, void> {
     const textEditorElement: atom$TextEditorElement = (this._textEditorElement = (document.createElement(
       'atom-text-editor',
     ): any));
+
+    textEditorElement.classList.add('nuclide-wrapped-editor');
+
+    if (parseInt(this.props.tabIndex, 10) >= 0) {
+      // Make tab move to next element instead of inserting a 'tab' character
+      this._editorDisposables.add(
+        // Make AtomTextEditor properly shift-tabbable
+        atomTabIndexForwarder(textEditorElement),
+        // Make 'Tab' change focus instead of inserting tab character
+        Observable.fromEvent(textEditorElement, 'keydown').subscribe(event => {
+          if (event.key === 'Tab') {
+            event.stopPropagation();
+          }
+        }),
+      );
+    }
+
     textEditorElement.setModel(textEditor);
     textEditorElement.setAttribute('tabindex', this.props.tabIndex);
     // HACK! This is a workaround for the ViewRegistry where Atom has a default view provider for
@@ -198,7 +208,7 @@ export class AtomTextEditor extends React.Component<Props, void> {
     }
   }
 
-  componentWillReceiveProps(nextProps: Props): void {
+  UNSAFE_componentWillReceiveProps(nextProps: Props): void {
     if (
       nextProps.textBuffer !== this.props.textBuffer ||
       nextProps.readOnly !== this.props.readOnly
@@ -233,6 +243,10 @@ export class AtomTextEditor extends React.Component<Props, void> {
     }
     if (nextProps.disabled !== this.props.disabled) {
       this._updateDisabledState(nextProps.disabled);
+    }
+    if (nextProps.placeholderText !== this.props.placeholderText) {
+      this.getModel().setPlaceholderText(nextProps.placeholderText || '');
+      this.getModel().scheduleComponentUpdate();
     }
   }
 

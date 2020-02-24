@@ -17,7 +17,7 @@ import {getMatchRanges} from 'nuclide-commons/string';
 import {getCodeSearchServiceByNuclideUri} from '../../nuclide-remote-connection';
 import {Observable} from 'rxjs';
 import * as React from 'react';
-import PathWithFileIcon from '../../nuclide-ui/PathWithFileIcon';
+import PathWithFileIcon from 'nuclide-commons-ui/PathWithFileIcon';
 import {Subject} from 'rxjs';
 import escapeRegExp from 'escape-string-regexp';
 import {pickConfigByUri} from './utils';
@@ -44,7 +44,7 @@ export const CodeSearchProvider: Provider<FileResult> = {
   display: {
     action: 'nuclide-code-search:toggle-provider',
     prompt:
-      'Search code using tools like ag, rg or ack. Configure using the Nuclide config...',
+      'Search code using tools like rg or ack. Configure using the Nuclide config...',
     title: 'Code Search',
   },
   async isEligibleForDirectory(directory: atom$Directory): Promise<boolean> {

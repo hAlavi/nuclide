@@ -6,7 +6,7 @@
  * LICENSE file in the root directory of this source tree. An additional grant
  * of patent rights can be found in the PATENTS file in the same directory.
  *
- * @flow
+ * @flow strict-local
  * @format
  */
 
@@ -94,14 +94,14 @@ export function applyTextEdits(
 }
 
 export function applyTextEditsToBuffer(
-  buffer: atom$TextBuffer,
+  buffer: atom$TextBuffer | simpleTextBuffer$TextBuffer,
   edits: Array<TextEdit>,
 ): boolean {
   return applySortedTextEditsToBuffer(buffer, sortEdits(edits));
 }
 
 function applySortedTextEditsToBuffer(
-  buffer: atom$TextBuffer,
+  buffer: atom$TextBuffer | simpleTextBuffer$TextBuffer,
   edits: Array<TextEdit>,
 ): boolean {
   // For every edit, the start of its range will be after the end of the
@@ -138,7 +138,10 @@ function applySortedTextEditsToBuffer(
   return true;
 }
 
-function applyToBuffer(buffer: atom$TextBuffer, edit: TextEdit): boolean {
+function applyToBuffer(
+  buffer: atom$TextBuffer | simpleTextBuffer$TextBuffer,
+  edit: TextEdit,
+): boolean {
   if (edit.oldRange.start.row === edit.oldRange.end.row) {
     // A little extra validation when the old range spans only one line. In particular, this helps
     // when the old range is empty so there is no old text for us to compare against. We can at
@@ -176,6 +179,11 @@ function sortEdits(edits: Array<TextEdit>): Array<TextEdit> {
   // stable sort (preserve order of edits starting in the same location)
   return edits
     .map((edit, i) => [edit, i])
-    .sort(([e1, i1], [e2, i2]) => e1.oldRange.compare(e2.oldRange) || i1 - i2)
+    .sort(
+      ([e1, i1], [e2, i2]) =>
+        e1.oldRange.start.compare(e2.oldRange.start) ||
+        e1.oldRange.end.compare(e2.oldRange.end) ||
+        i1 - i2,
+    )
     .map(([edit]) => edit);
 }

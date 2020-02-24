@@ -47,13 +47,13 @@ type TreeNode = InnerNode | LeafNode;
  */
 export class WorkingSet {
   _uris: Array<string>;
+  _absoluteUris: Array<string>;
   _root: ?InnerNode;
 
   constructor(uris: Array<NuclideUri> = []) {
     try {
-      this._uris = dedupeUris(
-        uris.filter(uri => !nuclideUri.isBrokenDeserializedUri(uri)),
-      );
+      this._absoluteUris = dedupeUris(uris);
+      this._uris = this._absoluteUris.map(nuclideUri.getPath);
       this._root = this._buildDirTree(this._uris);
     } catch (e) {
       logger.error(
@@ -85,7 +85,8 @@ export class WorkingSet {
       return true;
     }
 
-    return this._containsPathFor(tokens, /* mustHaveLeaf */ true);
+    const uriTokens = tokens.map(nuclideUri.getPath);
+    return this._containsPathFor(uriTokens, /* mustHaveLeaf */ true);
   }
 
   containsDir(uri: NuclideUri): boolean {
@@ -106,7 +107,8 @@ export class WorkingSet {
       return true;
     }
 
-    return this._containsPathFor(tokens, /* mustHaveLeaf */ false);
+    const uriTokens = tokens.map(nuclideUri.getPath);
+    return this._containsPathFor(uriTokens, /* mustHaveLeaf */ false);
   }
 
   isEmpty(): boolean {
@@ -117,13 +119,18 @@ export class WorkingSet {
     return this._uris;
   }
 
+  getAbsoluteUris(): Array<string> {
+    return this._absoluteUris;
+  }
+
   append(...uris: Array<NuclideUri>): WorkingSet {
     return new WorkingSet(this._uris.concat(uris));
   }
 
   remove(rootUri: NuclideUri): WorkingSet {
     try {
-      const uris = this._uris.filter(uri => !nuclideUri.contains(rootUri, uri));
+      const uriPath = nuclideUri.getPath(rootUri);
+      const uris = this._uris.filter(uri => !nuclideUri.contains(uriPath, uri));
       return new WorkingSet(uris);
     } catch (e) {
       logger.error(e);

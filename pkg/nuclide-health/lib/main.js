@@ -19,7 +19,7 @@ import {Observable} from 'rxjs';
 import {getLogger} from 'log4js';
 
 // Imports from other Nuclide packages.
-import {isTrackSupported, track} from '../../nuclide-analytics';
+import {isTrackSupported, track} from 'nuclide-analytics';
 import createPackage from 'nuclide-commons-atom/createPackage';
 import {viewableFromReactElement} from '../../commons-atom/viewableFromReactElement';
 import {destroyItemWhere} from 'nuclide-commons-atom/destroyItemWhere';
@@ -35,8 +35,9 @@ import {
 } from './getChildProcesses';
 import getStats from './getStats';
 import getDOMCounters from './getDOMCounters';
+import trackKeyLatency from './trackKeyLatency';
+import trackNewEditorLatency from './trackNewEditorLatency';
 import trackStalls from './trackStalls';
-import {makeToolbarButtonSpec} from 'nuclide-commons-ui/ToolbarUtils';
 
 class Activation {
   _paneItemStates: Observable<PaneItemState>;
@@ -120,6 +121,8 @@ class Activation {
             );
           },
         ),
+        trackKeyLatency(),
+        trackNewEditorLatency(),
         trackStalls(),
       );
     }
@@ -131,14 +134,12 @@ class Activation {
 
   consumeToolBar(getToolBar: toolbar$GetToolbar): IDisposable {
     const toolBar = getToolBar('nuclide-health');
-    this._healthButton = toolBar.addButton(
-      makeToolbarButtonSpec({
-        icon: 'dashboard',
-        callback: 'nuclide-health:toggle',
-        tooltip: 'Toggle Nuclide Health Stats',
-        priority: -400,
-      }),
-    ).element;
+    this._healthButton = toolBar.addButton({
+      icon: 'dashboard',
+      callback: 'nuclide-health:toggle',
+      tooltip: 'Toggle Nuclide Health Stats',
+      priority: -400,
+    }).element;
     this._healthButton.classList.add('nuclide-health-jewel');
     const disposable = new UniversalDisposable(() => {
       this._healthButton = null;

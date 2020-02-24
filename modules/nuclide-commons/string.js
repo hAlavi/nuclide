@@ -72,10 +72,27 @@ const longFormats = [
   [Number.MAX_VALUE, 'years ago', YEAR],
 ];
 
+const longFormatsNumbers = [
+  [0.7 * MINUTE, 'just now'],
+  [1.5 * MINUTE, '1 minute ago'],
+  [60 * MINUTE, 'minutes ago', MINUTE],
+  [1.5 * HOUR, '1 hour ago'],
+  [DAY, 'hours ago', HOUR],
+  [2 * DAY, 'yesterday'],
+  [7 * DAY, 'days ago', DAY],
+  [1.5 * WEEK, '1 week ago'],
+  [MONTH, 'weeks ago', WEEK],
+  [1.5 * MONTH, '1 month ago'],
+  [YEAR, 'months ago', MONTH],
+  [1.5 * YEAR, '1 year ago'],
+  [Number.MAX_VALUE, 'years ago', YEAR],
+];
+
 export function relativeDate(
   input_: number | Date,
   reference_?: number | Date,
   useShortVariant?: boolean = false,
+  useNumbersOnly?: boolean = false,
 ): string {
   let input = input_;
   let reference = reference_;
@@ -91,7 +108,11 @@ export function relativeDate(
   }
 
   const delta = reference - input;
-  const formats = useShortVariant ? shortFormats : longFormats;
+  const formats = useShortVariant
+    ? shortFormats
+    : useNumbersOnly
+      ? longFormatsNumbers
+      : longFormats;
   for (const [limit, relativeFormat, remainder] of formats) {
     if (delta < limit) {
       if (typeof remainder === 'number') {
@@ -135,6 +156,30 @@ export function shellParse(str: string, env?: Object): Array<string> {
   for (let i = 0; i < result.length; i++) {
     if (typeof result[i] !== 'string') {
       if (result[i].op != null) {
+        throw new Error(
+          `Unexpected operator "${result[i].op}" provided to shellParse`,
+        );
+      } else {
+        throw new Error(
+          `Unexpected comment "${result[i].comment}" provided to shellParse`,
+        );
+      }
+    }
+  }
+  return result;
+}
+
+/**
+ * shell-quote's parse allows pipe operators and comments and globs
+ * We treat glob patterns as normal strings. For the other operators, we throw.
+ */
+export function shellParseWithGlobs(str: string, env?: Object): Array<string> {
+  const result = parse(str, env);
+  for (let i = 0; i < result.length; i++) {
+    if (typeof result[i] !== 'string') {
+      if (result[i].op === 'glob') {
+        result[i] = result[i].pattern;
+      } else if (result[i].op != null) {
         throw new Error(
           `Unexpected operator "${result[i].op}" provided to shellParse`,
         );
@@ -250,6 +295,16 @@ export function getMatchRanges(
   return ranges;
 }
 
+export function escapeMarkdown(markdown: string): string {
+  // Which characters can be backslash-escaped?
+  // markdown:   ! #    ()*+ -.        [\] _`{ }   https://daringfireball.net/projects/markdown/syntax#backslash
+  // commonMark: !"#$%&'()*+,-./:;<=>?@[\]^_`{|}~  https://spec.commonmark.org/0.28/#backslash-escapes
+  // We'll only backslash-escape the lowest common denominator.
+  const slashEscaped = markdown.replace(/[#!()*+\-.[\\\]_`{}]/g, '\\$&');
+  // And HTML tags need to be &lt; &gt; escaped.
+  return slashEscaped.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
 // Originally copied from:
 // http://stackoverflow.com/questions/3809401/what-is-a-good-regular-expression-to-match-a-url
 // But adopted to match `www.` urls as well as `https?` urls
@@ -260,3 +315,4 @@ export function getMatchRanges(
 export const URL_REGEX = /(https?:\/\/(?:www\.)?[-\w@:%.+~#=]{2,256}\.[a-z]{2,6}\b[-\w@:%+.~#?&/=!]*|www\.[-\w@:%.+~#=]{2,256}\.[a-z]{2,6}\b[-\w@:%+.~#?&/=!]*)/;
 
 export const ELLIPSIS_CHAR = '\u2026';
+export const ZERO_WIDTH_SPACE = '\u200B';

@@ -135,6 +135,26 @@ function f(): shape('vc' => shape('vc' => int)) {
   //                                      ^^^ .storage.type.php
 }
 
+function f(): {
+    $n = Foo\bar($test);
+    //   ^^^ entity.name.type.namespace.php
+    //      ^ punctuation.separator.inheritance.php
+    //       ^^^ entity.name.function.php
+
+    $n = Foo\Bar\Test\fn($t);
+    //   ^^^ entity.name.type.namespace.php
+    //      ^ punctuation.separator.inheritance.php
+    //       ^^^ entity.name.type.namespace.php
+    //          ^ punctuation.separator.inheritance.php
+    //           ^^^^ entity.name.type.namespace.php
+    //               ^ punctuation.separator.inheritance.php
+    //                ^^ entity.name.function.php
+}
+
+function f(): shape(...) {
+  //          ^^^^^^^^^^ storage.type.shape.php
+}
+
 class Something {
   public static function f(int $x, shape('vc' => int) $y): shape('vc' => int) {
     //                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ meta.function.arguments.php

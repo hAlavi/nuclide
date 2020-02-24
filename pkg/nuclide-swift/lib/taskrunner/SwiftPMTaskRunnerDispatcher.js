@@ -5,7 +5,7 @@
  * This source code is licensed under the license found in the LICENSE file in
  * the root directory of this source tree.
  *
- * @flow
+ * @flow strict
  * @format
  */
 
@@ -30,7 +30,7 @@ type SwiftPMTaskRunnerAction =
     }
   | {
       actionType: 'UPDATE_COMPILE_COMMANDS',
-      compileCommands: Map<string, string>,
+      compileCommands: Map<string, Array<string>>,
     };
 
 export const ActionTypes = Object.freeze({

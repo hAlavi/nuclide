@@ -9,34 +9,33 @@
  * @format
  */
 
-import type {ConfigEntry} from '../../nuclide-rpc';
+import type {ConfigEntry} from '../../nuclide-rpc/lib/types';
 
 import invariant from 'assert';
 import os from 'os';
 import {getLogger} from 'log4js';
 import WS from 'ws';
-import {attachEvent} from 'nuclide-commons/event';
 import UniversalDisposable from 'nuclide-commons/UniversalDisposable';
 
 import blocked from './blocked';
 import {QueuedAckTransport} from 'big-dig/src/socket/QueuedAckTransport';
 import {deserializeArgs, sendJsonResponse, sendTextResponse} from './utils';
-import {HistogramTracker} from '../../nuclide-analytics';
+import {HistogramTracker} from 'nuclide-analytics';
 import {getVersion} from '../../nuclide-version';
 import {flushLogsAndExit} from '../../nuclide-logging';
 import {RpcConnection, ServiceRegistry} from '../../nuclide-rpc';
 import {WebSocketTransport} from 'big-dig/src/socket/WebSocketTransport';
 import {getServerSideMarshalers} from '../../nuclide-marshalers-common';
 import {protocolLogger} from './utils';
-import {track} from '../../nuclide-analytics';
+import {track} from 'nuclide-analytics';
 
 export const HEARTBEAT_CHANNEL = 'heartbeat';
 
-// eslint-disable-next-line rulesdir/no-commonjs
+// eslint-disable-next-line nuclide-internal/no-commonjs
 const connect: connect$module = require('connect');
-// eslint-disable-next-line rulesdir/no-commonjs
+// eslint-disable-next-line nuclide-internal/no-commonjs
 const http: http$fixed = (require('http'): any);
-// eslint-disable-next-line rulesdir/no-commonjs
+// eslint-disable-next-line nuclide-internal/no-commonjs
 const https: https$fixed = (require('https'): any);
 
 const logger = getLogger('nuclide-server');
@@ -51,6 +50,7 @@ type NuclideServerOptions = {
 
 export default class NuclideServer {
   static _theServer: ?NuclideServer;
+  static _shutdownCallbacks: Set<() => void> = new Set();
 
   _webServer: http$fixed$Server;
   _webSocketServer: WS.Server;
@@ -128,6 +128,10 @@ export default class NuclideServer {
     ['get', 'post', 'delete', 'put'].forEach(methodName => {
       // $FlowFixMe - Use map instead of computed property on library type.
       this._app[methodName] = (uri, handler) => {
+        /* $FlowFixMe(>=0.86.0) This
+         * comment suppresses an error found when Flow v0.86 was
+         * deployed. To see the error, delete this comment and
+         * run Flow. */
         this._app.use(uri, (request, response, next) => {
           if (request.method.toUpperCase() !== methodName.toUpperCase()) {
             // skip if method doesn't match.
@@ -145,7 +149,9 @@ export default class NuclideServer {
       server: this._webServer,
       perMessageDeflate: true,
     });
-    webSocketServer.on('connection', socket => this._onConnection(socket));
+    webSocketServer.on('connection', (socket, req) =>
+      this._onConnection(socket, req),
+    );
     webSocketServer.on('error', error =>
       logger.error('WebSocketServer Error:', error),
     );
@@ -190,6 +196,13 @@ export default class NuclideServer {
 
   static shutdown(): void {
     logger.info('Shutting down the server');
+    for (const callback of NuclideServer._shutdownCallbacks) {
+      try {
+        callback();
+      } catch (e) {
+        logger.error('Error when executing shutdown callback:', e);
+      }
+    }
     try {
       if (NuclideServer._theServer != null) {
         NuclideServer._theServer.close();
@@ -199,6 +212,11 @@ export default class NuclideServer {
     } finally {
       flushLogsAndExit(0);
     }
+  }
+
+  static registerShutdownCallback(callback: () => void): IDisposable {
+    NuclideServer._shutdownCallbacks.add(callback);
+    return {dispose: () => NuclideServer._shutdownCallbacks.delete(callback)};
   }
 
   static closeConnection(client: RpcConnection<QueuedAckTransport>): void {
@@ -211,11 +229,10 @@ export default class NuclideServer {
   _closeConnection(client: RpcConnection<QueuedAckTransport>): void {
     if (this._clients.get(client.getTransport().id) === client) {
       this._clients.delete(client.getTransport().id);
-      client.dispose();
     }
   }
 
-  connect(): Promise<any> {
+  connect(): Promise<void> {
     return new Promise((resolve, reject) => {
       this._webServer.on('listening', () => {
         resolve();
@@ -234,7 +251,7 @@ export default class NuclideServer {
   callService(serviceName: string, args: Array<any>): Promise<any> {
     const serviceFunction = this._xhrServiceRegistry[serviceName];
     if (!serviceFunction) {
-      throw Error('No service registered with name: ' + serviceName);
+      throw new Error('No service registered with name: ' + serviceName);
     }
     return serviceFunction.apply(this, args);
   }
@@ -287,41 +304,41 @@ export default class NuclideServer {
     );
   }
 
-  _onConnection(socket: WS): void {
+  _onConnection(socket: WS, req: http$IncomingMessage): void {
     logger.debug('WebSocket connecting');
+
+    const clientId = req.headers.client_id;
+    logger.info(`received client_id in header ${clientId}`);
 
     let client: ?RpcConnection<QueuedAckTransport> = null;
 
-    const errorSubscription = attachEvent(socket, 'error', e =>
-      logger.error('WebSocket error before first message', e),
-    );
-
-    socket.once('message', (clientId: string) => {
-      errorSubscription.dispose();
-      client = this._clients.get(clientId);
-      const transport = new WebSocketTransport(clientId, socket);
-      if (client == null) {
-        client = RpcConnection.createServer(
-          this._rpcServiceRegistry,
-          new QueuedAckTransport(clientId, transport, protocolLogger),
-          {},
-          clientId,
-          protocolLogger,
-        );
-        this._clients.set(clientId, client);
-      } else {
-        invariant(clientId === client.getTransport().id);
-        client.getTransport().reconnect(transport);
-      }
-    });
+    client = this._clients.get(clientId);
+    const transport = new WebSocketTransport(clientId, socket);
+    if (client == null) {
+      client = RpcConnection.createServer(
+        this._rpcServiceRegistry,
+        new QueuedAckTransport(clientId, transport, protocolLogger),
+        {},
+        clientId,
+        protocolLogger,
+      );
+      this._clients.set(clientId, client);
+    } else {
+      invariant(clientId === client.getTransport().id);
+      client.getTransport().reconnect(transport);
+    }
   }
 
-  close() {
-    invariant(NuclideServer._theServer === this);
-    NuclideServer._theServer = null;
+  close(): Promise<void> {
+    return new Promise(resolve => {
+      invariant(NuclideServer._theServer === this);
+      NuclideServer._theServer = null;
 
-    this._disposables.dispose();
-    this._webSocketServer.close();
-    this._webServer.close();
+      this._disposables.dispose();
+      this._webSocketServer.close();
+      this._webServer.close(() => {
+        resolve();
+      });
+    });
   }
 }

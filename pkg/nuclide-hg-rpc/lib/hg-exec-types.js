@@ -5,7 +5,7 @@
  * This source code is licensed under the license found in the LICENSE file in
  * the root directory of this source tree.
  *
- * @flow
+ * @flow strict
  * @format
  */
 
@@ -17,4 +17,5 @@ export type HgExecOptions = {|
   NO_HGPLAIN?: boolean,
   TTY_OUTPUT?: boolean,
   HGEDITOR?: string,
+  useMerge3?: boolean,
 |};

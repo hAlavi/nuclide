@@ -9,22 +9,35 @@
  * @format
  */
 
+import type {ResolvedTunnel, Tunnel} from 'nuclide-adb/lib/types';
 import type {NuclideUri} from 'nuclide-commons/nuclideUri';
-import type {OpenTunnel, Tunnel} from '../types';
+import type {ActiveTunnel} from '../types';
+import passesGK from 'nuclide-commons/passesGK';
 
 import * as React from 'react';
 import ManualTunnelSection from './ManualTunnelSection';
 import {TunnelsPanelTable} from './TunnelsPanelTable';
+import {List} from 'immutable';
 
 export type Props = {
-  tunnels: Array<[Tunnel, OpenTunnel]>,
-  closeTunnel: Tunnel => void,
-  workingDirectoryHost: 'localhost' | ?NuclideUri,
+  tunnels: List<ActiveTunnel>,
+  closeTunnel: ResolvedTunnel => void,
+  workingDirectory: ?NuclideUri,
   openTunnel(tunnel: Tunnel): void,
 };
 
-export class TunnelsPanelContents extends React.Component<Props> {
-  props: Props;
+type State = {
+  allowManualTunnels: boolean,
+};
+
+export class TunnelsPanelContents extends React.Component<Props, State> {
+  constructor() {
+    super();
+    this.state = {allowManualTunnels: false};
+    passesGK('nuclide_allow_manual_tunnels').then(result => {
+      this.setState({allowManualTunnels: result});
+    });
+  }
 
   render(): React.Element<any> {
     return (
@@ -33,10 +46,12 @@ export class TunnelsPanelContents extends React.Component<Props> {
           tunnels={this.props.tunnels}
           closeTunnel={this.props.closeTunnel}
         />
-        <ManualTunnelSection
-          workingDirectoryHost={this.props.workingDirectoryHost}
-          openTunnel={this.props.openTunnel}
-        />
+        {this.state.allowManualTunnels && (
+          <ManualTunnelSection
+            workingDirectory={this.props.workingDirectory}
+            openTunnel={this.props.openTunnel}
+          />
+        )}
       </div>
     );
   }

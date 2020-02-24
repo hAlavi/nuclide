@@ -61,6 +61,7 @@ function shouldDisplayActionTreeItem(
       if (
         node.repo == null ||
         node.repo.getType() !== 'hg' ||
+        // $FlowFixMe(>=0.68.0) Flow suppress (T27187857)
         typeof node.repo.isStatusUntracked !== 'function'
       ) {
         return false;
@@ -119,7 +120,9 @@ export function activate(state: any): void {
       'nuclide-hg-repository:confirm-and-revert',
       event => {
         const editorElement: atom$TextEditorElement = (event.currentTarget: any);
-        confirmAndRevertPath(editorElement.getModel().getPath());
+        const path = editorElement.getModel().getPath();
+        const repository = path == null ? null : repositoryForPath(path);
+        confirmAndRevertPath(repository, path);
       },
     ),
   );
@@ -130,7 +133,9 @@ export function activate(state: any): void {
       'nuclide-hg-repository:add',
       event => {
         const editorElement: atom$TextEditorElement = (event.currentTarget: any);
-        addPath(editorElement.getModel().getPath());
+        const path = editorElement.getModel().getPath();
+        const repository = path == null ? null : repositoryForPath(path);
+        addPath(repository, path);
       },
     ),
   );
@@ -181,7 +186,9 @@ export function addItemsToFileTreeContextMenu(
       callback() {
         // TODO(most): support reverting multiple nodes at once.
         const revertNode = contextMenu.getSingleSelectedNode();
-        confirmAndRevertPath(revertNode == null ? null : revertNode.uri);
+        const path = revertNode == null ? null : revertNode.uri;
+        const repository = path == null ? null : repositoryForPath(path);
+        confirmAndRevertPath(repository, path);
       },
       shouldDisplay() {
         return shouldDisplayActionTreeItem(contextMenu, 'Revert');
@@ -197,7 +204,9 @@ export function addItemsToFileTreeContextMenu(
       callback() {
         const nodes = contextMenu.getSelectedNodes();
         for (const addNode of nodes) {
-          addPath(addNode == null ? null : addNode.uri);
+          const path = addNode == null ? addNode : addNode.uri;
+          const repository = path == null ? null : repositoryForPath(path);
+          addPath(repository, path);
         }
       },
       shouldDisplay() {

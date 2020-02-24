@@ -5,13 +5,13 @@
  * This source code is licensed under the license found in the LICENSE file in
  * the root directory of this source tree.
  *
- * @flow
+ * @flow strict-local
  * @format
  */
 
 import type {TypeHint} from '../../nuclide-type-hint/lib/rpc-types';
 
-import {trackTiming} from '../../nuclide-analytics';
+import {trackTiming} from 'nuclide-analytics';
 import {typeHintFromSnippet} from '../../nuclide-language-service-rpc';
 import {getDeclaration} from './libclang';
 

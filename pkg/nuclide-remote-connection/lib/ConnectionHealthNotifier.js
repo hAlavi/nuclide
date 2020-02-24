@@ -12,7 +12,7 @@
 import type {XhrConnectionHeartbeat} from 'big-dig/src/client/XhrConnectionHeartbeat';
 
 import invariant from 'assert';
-import {trackEvent} from '../../nuclide-analytics';
+import {trackEvent} from 'nuclide-analytics';
 import UniversalDisposable from 'nuclide-commons/UniversalDisposable';
 import {getLogger} from 'log4js';
 
@@ -30,7 +30,7 @@ type HeartbeatNotification = {
 // Returning true short-circuits the default error handling in onHeartbeatError()
 export type OnHeartbeatErrorCallback = (errorCode: string) => boolean;
 
-// Provides feedback to the user of the health of a NuclideSocket.
+// Provides feedback to the user of the health of a ReliableSocket.
 export class ConnectionHealthNotifier {
   _heartbeatNetworkAwayCount: number;
   _lastHeartbeatNotification: ?HeartbeatNotification;
@@ -114,7 +114,7 @@ export class ConnectionHealthNotifier {
           HEARTBEAT_NOTIFICATION_WARNING,
           code,
           `Nuclide server cannot be reached at "${uri}".<br/>` +
-            'Nuclide will reconnect when the network is restored.',
+            ' Nuclide will reconnect when the network is restored.',
           /* dismissable */ true,
           /* askToReload */ false,
         );
@@ -133,6 +133,7 @@ export class ConnectionHealthNotifier {
           type: 'heartbeat-error',
           data: {
             code: code || '',
+            originalCode: originalCode || '',
             message: message || '',
             host,
           },
@@ -186,6 +187,19 @@ export class ConnectionHealthNotifier {
               // nuclide-server/scripts/nuclide_server_manager.py.
               'The Nuclide server certificate has most likely expired.<br>' +
               'For your security, certificates automatically expire after 14 days.<br>' +
+              'Please reload Atom to restore your remote project connection.',
+            /* dismissable */ true,
+            /* askToReload */ true,
+          );
+          break;
+        case 'CERT_SIGNATURE_FAILURE':
+          addHeartbeatNotification(
+            HEARTBEAT_NOTIFICATION_ERROR,
+            code,
+            '**Certificate No Longer Valid**<br/>' +
+              'The Nuclide server cert is no longer valid for this client.<br>' +
+              'This can happen  when you connect to the server with another ' +
+              'client, which is not currently supported.<br>' +
               'Please reload Atom to restore your remote project connection.',
             /* dismissable */ true,
             /* askToReload */ true,

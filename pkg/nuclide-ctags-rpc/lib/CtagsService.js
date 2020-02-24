@@ -87,7 +87,6 @@ export class CtagsService {
                 return null;
               }),
             );
-            // $FlowFixMe(>=0.55.0) Flow suppress
             resolve(arrayCompact(processed));
           }
         },
@@ -107,6 +106,15 @@ export async function getCtagsService(uri: NuclideUri): Promise<?CtagsService> {
   );
   if (dir == null) {
     return null;
+  }
+  // TAGS and tags are very much incompatible (emacs vs ctags style).
+  // Currently the TAGS format also makes node-ctags crash (!!)
+  // As such, on case-insensitive filesystems we need to double check.
+  if (process.platform !== 'linux') {
+    const files = await fsPromise.readdir(dir);
+    if (!files.includes(TAGS_FILENAME)) {
+      return null;
+    }
   }
   return new CtagsService(nuclideUri.join(dir, TAGS_FILENAME));
 }

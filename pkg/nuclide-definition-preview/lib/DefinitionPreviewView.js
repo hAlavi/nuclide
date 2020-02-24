@@ -19,7 +19,7 @@ import {goToLocation} from 'nuclide-commons-atom/go-to-location';
 import nullthrows from 'nullthrows';
 import {bufferForUri} from '../../nuclide-remote-connection';
 import {AtomTextEditor} from 'nuclide-commons-ui/AtomTextEditor';
-import analytics from 'nuclide-commons-atom/analytics';
+import analytics from 'nuclide-commons/analytics';
 import featureConfig from 'nuclide-commons-atom/feature-config';
 import invariant from 'assert';
 import {TextBuffer} from 'atom';
@@ -65,7 +65,7 @@ export class DefinitionPreviewView extends React.Component<
     );
   }
 
-  componentWillReceiveProps(newProps: ContextElementProps): void {
+  UNSAFE_componentWillReceiveProps(newProps: ContextElementProps): void {
     if (newProps.definition != null) {
       const definition = newProps.definition;
       // The buffer always needs to point to the right file path, so create a new one with
@@ -108,7 +108,7 @@ export class DefinitionPreviewView extends React.Component<
     const marker = editor.markBufferPosition(definition.position);
     editor.decorateMarker(marker, {
       type: 'line',
-      class: 'nuclide-current-line-highlight',
+      class: 'debugger-current-line-highlight',
     });
   }
 

@@ -25,7 +25,9 @@ import nuclideUri from 'nuclide-commons/nuclideUri';
 import {runCommand} from 'nuclide-commons/process';
 import {observeRawStream} from 'nuclide-commons/stream';
 import {Observable} from 'rxjs';
+import {getNuclideRealDir} from 'nuclide-commons/system-info';
 import {ROOT_FS} from '../../../nuclide-fs';
+import {getPathToLogDir} from '../../../nuclide-logging';
 
 //------------------------------------------------------------------------------
 // Services
@@ -133,6 +135,61 @@ export async function readdir(
 }
 
 /**
+ * Sorts the result of readdir() by alphabetical order (case-insensitive).
+ */
+export async function readdirSorted(
+  path: NuclideUri,
+): Promise<Array<DirectoryEntry>> {
+  return (await ROOT_FS.readdir(path)).sort((a, b) => {
+    return a[0].toLowerCase().localeCompare(b[0].toLowerCase());
+  });
+}
+
+/**
+ * Recursively lists all children of the given directory. The limit param
+ * puts a bound on the maximum number of entries that can be returned.
+ * TODO: Consider adding concurrency while traversing search directories.
+ */
+export async function readdirRecursive(
+  root: NuclideUri,
+  limit: number = 100,
+): Promise<Array<DirectoryEntry>> {
+  // Keep a running array of all files and directories we encounter.
+  const result = [];
+
+  const helper = async (path): Promise<void> => {
+    const entries = await ROOT_FS.readdir(nuclideUri.join(root, path));
+
+    // We have to sort the entries to ensure that the limit is applied
+    // consistently.
+    entries.sort((a, b) => a[0].localeCompare(b[0]));
+
+    for (const entry of entries) {
+      // Prevent the results array from going over the limit.
+      if (result.length >= limit) {
+        break;
+      }
+
+      const [name, isFile, isSymbolicLink] = entry;
+
+      // Path to this entry from root.
+      const entryPath = nuclideUri.join(path, name);
+
+      result.push([entryPath, isFile, isSymbolicLink]);
+
+      // Recurse on directory if we aren't at the limit.
+      if (!isFile && result.length < limit) {
+        // eslint-disable-next-line no-await-in-loop
+        await helper(entryPath);
+      }
+    }
+  };
+
+  await helper('.');
+  return result;
+}
+
+/**
  * Gets the real path of a file path.
  * It could be different than the given path if the file is a symlink
  * or exists in a symlinked directory.
@@ -147,6 +204,13 @@ export function realpath(path: NuclideUri): Promise<NuclideUri> {
  */
 export function resolveRealPath(path: string): Promise<string> {
   return ROOT_FS.realpath(nuclideUri.expandHomeDir(path));
+}
+
+/**
+ * Returns the specified file path with the home dir ~/ expanded.
+ */
+export function expandHomeDir(path: string): Promise<string> {
+  return Promise.resolve(nuclideUri.expandHomeDir(path));
 }
 
 /**
@@ -182,11 +246,15 @@ export async function copy(
   sourcePath: NuclideUri,
   destinationPath: NuclideUri,
 ): Promise<boolean> {
-  const isExistingFile = await ROOT_FS.exists(destinationPath);
-  if (isExistingFile) {
-    return false;
+  try {
+    await ROOT_FS.copy(sourcePath, destinationPath);
+  } catch (err) {
+    if (err.code === 'EEXIST') {
+      // expected if the targetPath already exists
+      return false;
+    }
+    throw err;
   }
-  await ROOT_FS.copy(sourcePath, destinationPath);
   // TODO: May need to move into ROOT_FS if future filesystems support writing.
   await fsPromise.copyFilePermissions(sourcePath, destinationPath);
   return true;
@@ -219,6 +287,30 @@ export async function copyDir(
   );
   // Are all the resulting booleans true?
   return didCopyAll.every(b => b);
+}
+
+/**
+ * Runs the equivalent of `ln -s sourcePath targetPath`
+ * `type` is an argument particular to Windows platforms, and will be ignored
+ * on any others.
+ * @return true if the operation was successful; false if it wasn't.
+ */
+export async function symlink(
+  sourcePath: NuclideUri,
+  targetPath: NuclideUri,
+  type?: 'dir' | 'file' | 'junction',
+): Promise<boolean> {
+  try {
+    await ROOT_FS.symlink(sourcePath, targetPath, type);
+  } catch (err) {
+    if (err.code === 'EEXIST') {
+      // expected if the targetPath already exists
+      return false;
+    }
+    throw err;
+  }
+  await fsPromise.copyFilePermissions(sourcePath, targetPath);
+  return true;
 }
 
 /**
@@ -355,4 +447,21 @@ export async function getFreeSpace(path: NuclideUri): Promise<?number> {
     })
     .toPromise()
     .catch(() => null);
+}
+
+// Wrapper around fsPromise.tempdir()
+export async function tempdir(prefix: string = ''): Promise<string> {
+  return fsPromise.tempdir(prefix);
+}
+
+export async function getNuclideDir(): Promise<NuclideUri> {
+  return getNuclideRealDir();
+}
+
+export async function getNuclideLogDir(): Promise<NuclideUri> {
+  return getPathToLogDir();
+}
+
+export async function guessRealPath(path: NuclideUri): Promise<NuclideUri> {
+  return fsPromise.guessRealPath(path);
 }

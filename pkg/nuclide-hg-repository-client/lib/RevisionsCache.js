@@ -5,14 +5,12 @@
  * This source code is licensed under the license found in the LICENSE file in
  * the root directory of this source tree.
  *
- * @flow
+ * @flow strict-local
  * @format
  */
 
-import type {
-  HgService,
-  RevisionInfoFetched,
-} from '../../nuclide-hg-rpc/lib/HgService';
+import type {RevisionInfoFetched} from '../../nuclide-hg-rpc/lib/types';
+import typeof * as HgService from '../../nuclide-hg-rpc/lib/HgService';
 
 import {arrayEqual} from 'nuclide-commons/collection';
 import {fastDebounce} from 'nuclide-commons/observable';
@@ -61,20 +59,22 @@ function isEqualRevisions(
 }
 
 export default class RevisionsCache {
-  _hgService: HgService;
+  _workingDirectory: string;
   _revisions: BehaviorSubject<RevisionInfoFetched>;
   _lazyRevisionFetcher: Observable<RevisionInfoFetched>;
   _fetchRevisionsRequests: Subject<null>;
   _isFetchingRevisions: Subject<boolean>;
+  _service: HgService;
 
-  constructor(hgService: HgService) {
-    this._hgService = hgService;
+  constructor(workingDirectory: string, service: HgService) {
+    this._workingDirectory = workingDirectory;
     this._revisions = new BehaviorSubject({
       revisions: [],
       fromFilesystem: false,
     });
     this._fetchRevisionsRequests = new Subject();
     this._isFetchingRevisions = new Subject();
+    this._service = service;
 
     this._lazyRevisionFetcher = this._fetchRevisionsRequests
       .startWith(null) // Initially, no refresh requests applied.
@@ -95,13 +95,14 @@ export default class RevisionsCache {
       )
       .distinctUntilChanged(isEqualRevisions)
       .do(revisions => this._revisions.next(revisions))
-      .share();
+      // $FlowFixMe
+      .shareReplay(1);
   }
 
   _fetchSmartlogRevisions(): Observable<RevisionInfoFetched> {
     this._isFetchingRevisions.next(true);
-    return this._hgService
-      .fetchSmartlogRevisions()
+    return this._service
+      .fetchSmartlogRevisions(this._workingDirectory)
       .refCount()
       .map(revisions => ({revisions, fromFilesystem: true}))
       .timeout(FETCH_REVISIONS_TIMEOUT_MS)

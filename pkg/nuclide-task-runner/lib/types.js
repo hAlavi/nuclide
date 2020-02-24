@@ -13,9 +13,9 @@ import type {NuclideUri} from 'nuclide-commons/nuclideUri';
 import type {LocalStorageJsonTable} from '../../commons-atom/LocalStorageJsonTable';
 import type {IconName} from 'nuclide-commons-ui/Icon';
 import type {Task} from '../../commons-node/tasks';
-import type {Message} from 'nuclide-commons/process';
+import type {Message, Status} from 'nuclide-commons/process';
 import type {ConsoleApi, ConsoleService} from 'atom-ide-ui';
-
+import * as React from 'react';
 import * as Immutable from 'immutable';
 
 export type AppState = {
@@ -32,8 +32,15 @@ export type AppState = {
 
   runningTask: ?TaskStatus,
 
+  mostRecentTaskOutcome: ?TaskOutcome,
+
   consoleService: ?ConsoleService,
   consolesForTaskRunners: Immutable.Map<TaskRunner, ConsoleApi>,
+};
+
+export type TaskOutcome = {
+  type: 'success' | 'cancelled' | 'error',
+  message: string,
 };
 
 export type ToolbarStatePreference = {
@@ -50,10 +57,26 @@ export type SerializedAppState = {
   version?: number,
 };
 
+export type TaskRunnerBulletinTitle = {
+  message: string,
+  level?: 'log' | 'success' | 'warning' | 'error',
+};
+
+export type TaskRunnerBulletinStatus = {
+  title: TaskRunnerBulletinTitle,
+  detail: React.Element<any>,
+};
+
+export type TaskRunnerBulletinStatusEvent = {
+  type: 'bulletin',
+  status: TaskRunnerBulletinStatus,
+};
+
 export type TaskStatus = {
   metadata: TaskMetadata,
   task: Task,
   progress: ?number,
+  status: ?Status,
   startDate: Date,
 };
 
@@ -70,12 +93,16 @@ export type TaskMetadata = {
   hidden?: boolean, // By default, this is false
 };
 
+export type TaskOptions = {
+  [string]: mixed,
+};
+
 export type TaskRunner = {
   id: string,
   name: string,
   +getExtraUi?: () => React$ComponentType<any>,
   +getIcon: () => React$ComponentType<any>,
-  +runTask: (taskType: string) => Task,
+  +runTask: (taskType: string, options: ?TaskOptions) => Task,
   // Returns a callback that executes when the task runner determines whether it should be enabled
   // or when the task list changes for the project root
   +setProjectRoot: (
@@ -95,11 +122,17 @@ export type TaskRunnerState = {
 export type Store = {
   getState(): AppState,
   dispatch(action: Action): void,
+  subscribe(listener: () => void): () => void,
+  replaceReducer(reducer: () => mixed): void,
 };
 
 export type BoundActionCreators = {
   registerTaskRunner(taskRunner: TaskRunner): void,
-  runTask(taskId: TaskMetadata): void,
+  runTask(
+    taskRunner: TaskRunner,
+    taskId: TaskMetadata,
+    options: ?TaskOptions,
+  ): void,
   setProjectRoot(dir: ?NuclideUri): void,
   setConsoleService(service: ?ConsoleService): void,
   setToolbarVisibility(visible: boolean): void,
@@ -157,6 +190,13 @@ type TaskProgressAction = {
   },
 };
 
+type TaskStatusAction = {
+  type: 'TASK_STATUS',
+  payload: {
+    status: ?Status,
+  },
+};
+
 type TaskMessageAction = {
   type: 'TASK_MESSAGE',
   payload: {
@@ -169,6 +209,7 @@ export type TaskErroredAction = {
   type: 'TASK_ERRORED',
   payload: {
     error: Error,
+    taskRunner: TaskRunner,
     taskStatus: TaskStatus,
   },
 };
@@ -205,7 +246,9 @@ export type UnregisterTaskRunnerAction = {
 export type RunTaskAction = {
   type: 'RUN_TASK',
   payload: {
-    taskMeta: TaskMetadata & {taskRunner: TaskRunner},
+    taskMeta: TaskMetadata,
+    taskRunner: TaskRunner,
+    options: ?TaskOptions,
     verifySaved: boolean,
   },
 };
@@ -290,6 +333,7 @@ export type Action =
   | StopTaskAction
   | TaskCompletedAction
   | TaskProgressAction
+  | TaskStatusAction
   | TaskMessageAction
   | TaskErroredAction
   | TaskStartedAction

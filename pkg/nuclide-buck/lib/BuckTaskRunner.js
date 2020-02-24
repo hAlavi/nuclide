@@ -14,13 +14,19 @@ import type {TaskMetadata} from '../../nuclide-task-runner/lib/types';
 import type {Task} from '../../commons-node/tasks';
 import type {
   AppState,
+  BuckSubcommand,
+  CompilationDatabaseParams,
+  PreferredNames,
   SerializedState,
   Store,
-  TaskType,
-  CompilationDatabaseParams,
   TaskInfo,
+  TaskType,
 } from './types';
-import {formatDeploymentTarget} from './DeploymentTarget';
+import {combineEpicsFromImports} from 'nuclide-commons/epicHelpers';
+import {
+  formatDeploymentTarget,
+  selectValidDeploymentTarget,
+} from './DeploymentTarget';
 import {PlatformService} from './PlatformService';
 
 import invariant from 'assert';
@@ -30,24 +36,20 @@ import {createMessage, taskFromObservable} from '../../commons-node/tasks';
 import {NuclideArtilleryTrace} from '../../nuclide-artillery';
 import {BuckBuildSystem} from './BuckBuildSystem';
 import UniversalDisposable from 'nuclide-commons/UniversalDisposable';
-import {
-  combineEpics,
-  createEpicMiddleware,
-} from 'nuclide-commons/redux-observable';
+import {createEpicMiddleware} from 'nuclide-commons/redux-observable';
+import observableFromReduxStore from 'nuclide-commons/observableFromReduxStore';
 
 import {bindObservableAsProps} from 'nuclide-commons-ui/bindObservableAsProps';
-import {getLogger} from 'log4js';
 import {Icon} from 'nuclide-commons-ui/Icon';
 import * as Actions from './redux/Actions';
 import * as Epics from './redux/Epics';
 import Reducers from './redux/Reducers';
 import BuckToolbar from './BuckToolbar';
-import observeBuildCommands from './observeBuildCommands';
 import * as React from 'react';
 import {arrayEqual} from 'nuclide-commons/collection';
 import shallowequal from 'shallowequal';
 
-const TASKS = [
+export const TASKS = [
   {
     type: 'build',
     label: 'Build',
@@ -57,19 +59,32 @@ const TASKS = [
   {
     type: 'run',
     label: 'Run',
-    description: 'Run the specfied Buck target',
+    description: 'Run the specified Buck target',
     icon: 'triangle-right',
   },
   {
     type: 'test',
     label: 'Test',
-    description: 'Test the specfied Buck target',
+    description: 'Test the specified Buck target',
     icon: 'check',
   },
   {
-    type: 'debug',
-    label: 'Debug',
-    description: 'Debug the specfied Buck target',
+    type: 'build-launch-debug',
+    label: 'Build, launch && debug',
+    description: 'Build, launch and debug the specified Buck target',
+    icon: 'nuclicon-debugger',
+  },
+  {
+    type: 'launch-debug',
+    label: 'Launch && debug (skip build)',
+    description: 'Launch and debug the specified Buck target (skip building)',
+    icon: 'nuclicon-debugger',
+  },
+  {
+    type: 'attach-debug',
+    label: 'Attach to running',
+    description:
+      'Attemp to find a running specified Buck target and attach debugger',
     icon: 'nuclicon-debugger',
   },
 ];
@@ -84,9 +99,29 @@ function shouldEnableTask(taskType: TaskType, ruleType: string): boolean {
       return true;
     case 'run':
       return ruleType.endsWith('binary');
+    case 'build-launch-debug':
+    case 'attach-debug':
+      return ruleType.endsWith('binary') || ruleType.endsWith('test');
+    case 'launch-debug':
+      return false;
     default:
       return false;
   }
+}
+
+export function isDebugTask(taskType: TaskType) {
+  return (
+    taskType === 'build-launch-debug' ||
+    taskType === 'launch-debug' ||
+    taskType === 'attach-debug'
+  );
+}
+
+export function getBuckSubcommandForTaskType(
+  taskType: TaskType,
+): BuckSubcommand {
+  invariant(taskType === 'build' || taskType === 'run' || taskType === 'test');
+  return taskType;
 }
 
 export class BuckTaskRunner {
@@ -118,12 +153,13 @@ export class BuckTaskRunner {
           store.dispatch(Actions.setBuildTarget(buildTarget)),
         setDeploymentTarget: deploymentTarget =>
           store.dispatch(Actions.setDeploymentTarget(deploymentTarget)),
-        setTaskSettings: settings =>
-          store.dispatch(Actions.setTaskSettings(settings)),
+        setTaskSettings: (settings, unsanizitedSettings) =>
+          store.dispatch(
+            Actions.setTaskSettings(settings, unsanizitedSettings),
+          ),
       };
       this._extraUi = bindObservableAsProps(
-        // $FlowFixMe: type symbol-observable
-        Observable.from(store)
+        observableFromReduxStore(store)
           .map(appState => ({appState, ...boundActions}))
           .filter(props => props.appState.buckRoot != null),
         BuckToolbar,
@@ -147,7 +183,7 @@ export class BuckTaskRunner {
   }
 
   getBuildTarget(): ?string {
-    this._getStore().getState().buildTarget;
+    return this._getStore().getState().buildTarget;
   }
 
   getCompletedTasks(): rxjs$Observable<TaskInfo> {
@@ -158,12 +194,24 @@ export class BuckTaskRunner {
     this._getStore().dispatch(Actions.setBuildTarget(buildTarget));
   }
 
+  setDeploymentTarget(preferredNames: PreferredNames) {
+    const store = this._getStore();
+    const target = selectValidDeploymentTarget(
+      preferredNames,
+      store.getState().platformGroups,
+    );
+    if (target != null) {
+      store.dispatch(Actions.setDeploymentTarget(target));
+    }
+  }
+
   setProjectRoot(
     projectRoot: ?NuclideUri,
     callback: (enabled: boolean, taskList: Array<TaskMetadata>) => mixed,
   ): IDisposable {
-    // $FlowFixMe: type symbol-observable
-    const storeReady: Observable<AppState> = Observable.from(this._getStore())
+    const storeReady: Observable<AppState> = observableFromReduxStore(
+      this._getStore(),
+    )
       .distinctUntilChanged()
       .filter(
         (state: AppState) =>
@@ -184,9 +232,11 @@ export class BuckTaskRunner {
           selectedDeploymentTarget != null &&
           selectedDeploymentTarget.platform.isMobile
         ) {
-          selectedDeploymentTarget.platform
-            .tasksForDevice(selectedDeploymentTarget.device)
-            .forEach(taskType => tasksFromPlatform.add(taskType));
+          if (selectedDeploymentTarget.device != null) {
+            selectedDeploymentTarget.platform
+              .tasksForDevice(selectedDeploymentTarget.device)
+              .forEach(taskType => tasksFromPlatform.add(taskType));
+          }
         } else if (buildRuleType != null) {
           const ruleType = buildRuleType;
           platformGroups.forEach(platformGroup => {
@@ -237,6 +287,7 @@ export class BuckTaskRunner {
         buildTarget: this._serializedState.buildTarget || '',
         buildRuleType: null,
         selectedDeploymentTarget: null,
+        userSelectedDeploymentTarget: null,
         taskSettings: this._serializedState.taskSettings || {},
         platformProviderUi: null,
         lastSessionPlatformGroupName: this._serializedState
@@ -245,30 +296,26 @@ export class BuckTaskRunner {
         lastSessionDeviceGroupName: this._serializedState
           .selectedDeviceGroupName,
         lastSessionDeviceName: this._serializedState.selectedDeviceName,
+        unsanitizedTaskSettings:
+          this._serializedState.unsanitizedTaskSettings || {},
       };
-      const epics = Object.keys(Epics)
-        .map(k => Epics[k])
-        .filter(epic => typeof epic === 'function');
-      const rootEpic = (actions, store) =>
-        combineEpics(...epics)(actions, store)
-          // Log errors and continue.
-          .catch((err, stream) => {
-            getLogger('nuclide-buck').error(err);
-            return stream;
-          });
+      const rootEpic = combineEpicsFromImports(Epics, 'nuclide-buck');
       this._store = createStore(
         Reducers,
         initialState,
         applyMiddleware(createEpicMiddleware(rootEpic)),
       );
-      this._disposables.add(observeBuildCommands(this._store));
     }
     return this._store;
   }
 
   getCompilationDatabaseParamsForCurrentContext(): CompilationDatabaseParams {
-    const {selectedDeploymentTarget} = this._getStore().getState();
-    const empty = {flavorsForTarget: [], args: []};
+    const {
+      selectedDeploymentTarget,
+      taskSettings,
+    } = this._getStore().getState();
+    const args = taskSettings.compileDbArguments || [];
+    const empty = {flavorsForTarget: [], args, useDefaultPlatform: true};
     if (selectedDeploymentTarget == null) {
       return empty;
     }
@@ -279,17 +326,10 @@ export class BuckTaskRunner {
     return empty;
   }
 
-  runTask(taskType: string): Task {
-    invariant(
-      taskType === 'build' ||
-        taskType === 'test' ||
-        taskType === 'run' ||
-        taskType === 'debug',
-      'Invalid task type',
-    );
-
-    // eslint-disable-next-line rulesdir/atom-apis
+  runTask(rawTask: string): Task {
+    // eslint-disable-next-line nuclide-internal/atom-apis
     atom.workspace.open(CONSOLE_VIEW_URI, {searchAllPanes: true});
+    const taskType = ((rawTask: any): TaskType);
 
     const state = this._getStore().getState();
     const {
@@ -301,6 +341,7 @@ export class BuckTaskRunner {
     } = state;
     invariant(buckRoot != null);
     invariant(buildRuleType);
+    invariant(taskType);
 
     const deploymentTargetString = formatDeploymentTarget(
       selectedDeploymentTarget,
@@ -318,31 +359,45 @@ export class BuckTaskRunner {
           const trace = NuclideArtilleryTrace.begin('nuclide_buck', taskType);
           if (selectedDeploymentTarget) {
             const {platform, device} = selectedDeploymentTarget;
-            return platform
-              .runTask(
-                this._buildSystem,
-                taskType,
-                buildRuleType.buildTarget,
-                taskSettings,
-                device,
-              )
-              .do({
-                error() {
-                  trace.end();
-                },
-                complete() {
-                  trace.end();
-                },
-              });
+            let runTask;
+            if (platform.isMobile) {
+              invariant(device);
+              runTask = () =>
+                platform.runTask(
+                  this._buildSystem,
+                  taskType,
+                  buildRuleType.buildTarget,
+                  taskSettings,
+                  device,
+                );
+            } else {
+              runTask = () =>
+                platform.runTask(
+                  this._buildSystem,
+                  taskType,
+                  buildRuleType.buildTarget,
+                  taskSettings,
+                );
+            }
+            return runTask().finally(() => trace.end());
           } else {
-            const subcommand = taskType === 'debug' ? 'build' : taskType;
+            let subcommand;
+            if (isDebugTask(taskType)) {
+              if (buildRuleType.type.endsWith('test')) {
+                subcommand = 'test';
+              } else {
+                subcommand = 'build';
+              }
+            } else {
+              subcommand = getBuckSubcommandForTaskType(taskType);
+            }
             return this._buildSystem
               .runSubcommand(
                 buckRoot,
                 subcommand,
                 buildRuleType.buildTarget,
                 taskSettings,
-                taskType === 'debug',
+                isDebugTask(taskType),
                 null,
               )
               .do({
@@ -389,7 +444,7 @@ export class BuckTaskRunner {
       return;
     }
     const state = this._store.getState();
-    const {buildTarget, taskSettings} = state;
+    const {buildTarget, taskSettings, unsanitizedTaskSettings} = state;
     const target = state.selectedDeploymentTarget;
     let selectedPlatformGroupName;
     let selectedPlatformName;
@@ -416,6 +471,7 @@ export class BuckTaskRunner {
       selectedPlatformName,
       selectedDeviceGroupName,
       selectedDeviceName,
+      unsanitizedTaskSettings,
     };
   }
 }

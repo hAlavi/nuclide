@@ -6,7 +6,7 @@
  * LICENSE file in the root directory of this source tree. An additional grant
  * of patent rights can be found in the PATENTS file in the same directory.
  *
- * @flow
+ * @flow strict
  * @format
  */
 
@@ -29,7 +29,7 @@ export type SignatureHelpRegistry = (
  */
 export type SignatureHelpProvider = {
   priority: number,
-  grammarScopes: Array<string>,
+  +grammarScopes?: Array<string>,
 
   // A set of characters that will trigger signature help when typed.
   // If a null/empty set is provided, only manual activation of the command works.
@@ -43,17 +43,17 @@ export type SignatureHelpProvider = {
 
 export type SignatureHelp = {
   signatures: Array<Signature>,
-  activeSignature?: number,
-  activeParameter?: number,
+  activeSignature?: ?number,
+  activeParameter?: ?number,
 };
 
 export type Signature = {
   label: string,
-  documentation?: string,
-  parameters?: Array<SignatureParameter>,
+  documentation?: ?string,
+  parameters?: ?Array<SignatureParameter>,
 };
 
 export type SignatureParameter = {
   label: string,
-  documentation?: string,
+  documentation?: ?string,
 };

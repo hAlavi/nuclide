@@ -21,21 +21,24 @@ import type {
   RegExpFilterValue,
 } from 'nuclide-commons-ui/RegExpFilter';
 
-import analytics from 'nuclide-commons-atom/analytics';
+import analytics from 'nuclide-commons/analytics';
+import UniversalDisposable from 'nuclide-commons/UniversalDisposable';
 import DiagnosticsTable from './DiagnosticsTable';
+import nullthrows from 'nullthrows';
 import showModal from 'nuclide-commons-ui/showModal';
 import {Toggle} from 'nuclide-commons-ui/Toggle';
 import {Toolbar} from 'nuclide-commons-ui/Toolbar';
 import {ToolbarLeft} from 'nuclide-commons-ui/ToolbarLeft';
 import {ToolbarRight} from 'nuclide-commons-ui/ToolbarRight';
 import * as React from 'react';
+import shallowEqual from 'shallowequal';
 import {Button, ButtonSizes} from 'nuclide-commons-ui/Button';
 import {ButtonGroup} from 'nuclide-commons-ui/ButtonGroup';
 import FilterButton from './FilterButton';
 import RegExpFilter from 'nuclide-commons-ui/RegExpFilter';
 import SettingsModal from './SettingsModal';
 
-export type Props = {
+export type Props = {|
   diagnostics: Array<DiagnosticMessage>,
   filterByActiveTextEditor: boolean,
   onFilterByActiveTextEditorChange: (isChecked: boolean) => mixed,
@@ -44,7 +47,7 @@ export type Props = {
   onShowTracesChange: (isChecked: boolean) => mixed,
   gotoMessageLocation: (
     message: DiagnosticMessage,
-    options: {|focusEditor: boolean|},
+    options: {|focusEditor: boolean, pendingPane: boolean|},
   ) => void,
   selectMessage: (message: DiagnosticMessage) => void,
   selectedMessage: ?DiagnosticMessage,
@@ -58,19 +61,36 @@ export type Props = {
   onTypeFilterChange: (type: DiagnosticGroup) => mixed,
   textFilter: RegExpFilterValue,
   onTextFilterChange: (change: RegExpFilterChange) => mixed,
-};
+|};
 
 /**
  * Dismissable panel that displays the diagnostics from nuclide-diagnostics-store.
  */
 export default class DiagnosticsView extends React.Component<Props> {
+  _diagnosticsTableWrapperEl: ?HTMLDivElement;
+  _disposables: ?UniversalDisposable;
+  _filterComponent: ?RegExpFilter;
   _table: ?DiagnosticsTable;
 
   shouldComponentUpdate(nextProps: Props): boolean {
-    return nextProps.isVisible;
+    return nextProps.isVisible && !shallowEqual(this.props, nextProps);
   }
 
-  render(): React.Element<any> {
+  componentDidMount() {
+    this._disposables = new UniversalDisposable(
+      atom.commands.add(
+        nullthrows(this._diagnosticsTableWrapperEl),
+        'atom-ide:filter',
+        () => this._focusFilter(),
+      ),
+    );
+  }
+
+  componentWillUnmount() {
+    nullthrows(this._disposables).dispose();
+  }
+
+  render(): React.Node {
     const {diagnostics, showDirectoryColumn, showTraces} = this.props;
 
     const groups = ['errors', 'warnings', 'info'];
@@ -112,6 +132,7 @@ export default class DiagnosticsView extends React.Component<Props> {
               ))}
             </ButtonGroup>
             <RegExpFilter
+              ref={component => (this._filterComponent = component)}
               value={this.props.textFilter}
               onChange={this.props.onTextFilterChange}
             />
@@ -147,18 +168,23 @@ export default class DiagnosticsView extends React.Component<Props> {
             />
           </ToolbarRight>
         </Toolbar>
-        <DiagnosticsTable
-          ref={table => {
-            this._table = table;
-          }}
-          showFileName={!this.props.filterByActiveTextEditor}
-          diagnostics={diagnostics}
-          showDirectoryColumn={showDirectoryColumn}
-          showTraces={showTraces}
-          selectedMessage={this.props.selectedMessage}
-          selectMessage={this.props.selectMessage}
-          gotoMessageLocation={this.props.gotoMessageLocation}
-        />
+        <div
+          className="atom-ide-filterable"
+          ref={el => (this._diagnosticsTableWrapperEl = el)}
+          style={{display: 'flex', flexDirection: 'column'}}>
+          <DiagnosticsTable
+            ref={table => {
+              this._table = table;
+            }}
+            showFileName={!this.props.filterByActiveTextEditor}
+            diagnostics={diagnostics}
+            showDirectoryColumn={showDirectoryColumn}
+            showTraces={showTraces}
+            selectedMessage={this.props.selectedMessage}
+            selectMessage={this.props.selectMessage}
+            gotoMessageLocation={this.props.gotoMessageLocation}
+          />
+        </div>
       </div>
     );
   }
@@ -187,6 +213,12 @@ export default class DiagnosticsView extends React.Component<Props> {
       'diagnostics:open-all-files-with-errors',
     );
   };
+
+  _focusFilter(): void {
+    if (this._filterComponent != null) {
+      this._filterComponent.focus();
+    }
+  }
 
   _handleFocus = (event: SyntheticMouseEvent<*>): void => {
     if (this._table == null) {

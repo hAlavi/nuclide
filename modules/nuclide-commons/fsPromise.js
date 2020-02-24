@@ -21,6 +21,12 @@ import temp from 'temp';
 import nuclideUri from './nuclideUri';
 import {runCommand} from './process';
 
+type WriteOptions = {
+  encoding?: string,
+  mode?: number,
+  flag?: string,
+};
+
 /**
  * Create a temp directory with given prefix. The caller is responsible for cleaning up the
  *   drectory.
@@ -90,6 +96,22 @@ async function findNearestFile(
     }
     currentPath = nuclideUri.dirname(currentPath);
   }
+}
+
+async function findNearestAncestorNamed(
+  fileName: string,
+  pathToDirectory: string,
+): Promise<?string> {
+  const directory = await findNearestFile(fileName, pathToDirectory);
+  if (directory != null) {
+    return nuclideUri.join(directory, fileName);
+  } else {
+    return null;
+  }
+}
+
+function resolveRealPath(path: string): Promise<string> {
+  return realpath(nuclideUri.expandHomeDir(path));
 }
 
 /**
@@ -224,7 +246,7 @@ async function isNonNfsDirectory(directoryPath: string): Promise<boolean> {
   try {
     const stats = await stat(directoryPath);
     if (stats.isDirectory()) {
-      return !await isNfs(directoryPath);
+      return !(await isNfs(directoryPath));
     } else {
       return false;
     }
@@ -271,7 +293,6 @@ async function copyFilePermissions(
     // For new files, use the default process file creation mask.
     await chmod(
       destinationPath,
-      // $FlowIssue: umask argument is optional
       0o666 & ~process.umask(), // eslint-disable-line no-bitwise
     );
   }
@@ -284,7 +305,7 @@ async function copyFilePermissions(
 function writeFile(
   filename: string,
   data: Buffer | string,
-  options?: Object | string,
+  options?: WriteOptions | string,
 ): Promise<void> {
   return new Promise((resolve, reject) => {
     fsPlus.writeFile(filename, data, options, (err, result) => {
@@ -300,7 +321,7 @@ function writeFile(
 async function writeFileAtomic(
   path: string,
   data: Buffer | string,
-  options?: Object | string,
+  options?: WriteOptions | string,
 ): Promise<void> {
   const tempFilePath = await tempfile('nuclide');
   try {
@@ -322,6 +343,12 @@ async function writeFileAtomic(
     // if we did the mv() then the chmod(), there would be a brief period between
     // those two operations where the destination file might have the wrong permissions.
     await copyFilePermissions(realPath, tempFilePath);
+
+    // Ensure file has new permissions updated.
+    const mode = typeof options !== 'string' ? options?.mode : null;
+    if (mode != null) {
+      await chmod(tempFilePath, mode);
+    }
 
     // TODO: put renames into a queue so we don't write older save over new save.
     // Use mv as fs.rename doesn't work across partitions.
@@ -372,6 +399,42 @@ function close(fd: number): Promise<void> {
   });
 }
 
+function fstat(fd: number): Promise<fs.Stats> {
+  return new Promise((resolve, reject) => {
+    fs.fstat(fd, (err, result) => {
+      if (err == null) {
+        resolve(result);
+      } else {
+        reject(err);
+      }
+    });
+  });
+}
+
+async function fsync(fd: number): Promise<void> {
+  return new Promise((resolve, reject) => {
+    fs.fsync(fd, (err, result) => {
+      if (err == null) {
+        resolve(result);
+      } else {
+        reject(err);
+      }
+    });
+  });
+}
+
+function ftruncate(fd: number, len: number): Promise<void> {
+  return new Promise((resolve, reject) => {
+    fs.ftruncate(fd, len, (err, result) => {
+      if (err == null) {
+        resolve(result);
+      } else {
+        reject(err);
+      }
+    });
+  });
+}
+
 function lstat(path: string): Promise<fs.Stats> {
   return new Promise((resolve, reject) => {
     fs.lstat(path, (err, result) => {
@@ -409,11 +472,21 @@ export type MvOptions = {
  * The key difference between 'mv' and 'rename' is that 'mv' works across devices.
  * It's not uncommon to have temporary files in a different disk, for instance.
  */
-function mv(
+async function mv(
   sourcePath: string,
   destinationPath: string,
   options?: MvOptions = {},
 ): Promise<void> {
+  // mv-node fails to account for the case where a destination directory exists
+  // and `clobber` is false. This can result in the source directory getting
+  // deleted but the destination not getting written.
+  // https://github.com/andrewrk/node-mv/issues/30
+  if (options.clobber === false && (await exists(destinationPath))) {
+    const err: ErrnoError = new Error('Destination file exists');
+    err.code = 'EEXIST';
+    err.path = destinationPath;
+    throw err;
+  }
   return new Promise((resolve, reject) => {
     mvLib(sourcePath, destinationPath, options, error => {
       if (error) {
@@ -633,6 +706,39 @@ function rmdir(path: string): Promise<void> {
   });
 }
 
+/**
+ * Attempts to resolve the physical path of the filename.
+ * Sometimes filePath may not exist yet, in which case we need to look upwards
+ * for the first prefix that actually does exist.
+ */
+async function guessRealPath(filePath: string): Promise<string> {
+  if (nuclideUri.isRemote(filePath)) {
+    throw new Error('Only local paths can be used with guessRealPath');
+  }
+  const resolved = nuclideUri.resolve(filePath);
+  let prefix = resolved;
+  let suffix = null;
+  while (true) {
+    try {
+      // eslint-disable-next-line no-await-in-loop
+      const realPath = await realpath(prefix);
+      return suffix == null ? realPath : nuclideUri.join(realPath, suffix);
+    } catch (err) {
+      if (err.code !== 'ENOENT') {
+        throw err;
+      }
+      const basename = nuclideUri.basename(prefix);
+      if (basename === '') {
+        // We've reached the filesystem root.
+        break;
+      }
+      suffix = suffix == null ? basename : nuclideUri.join(basename, suffix);
+      prefix = nuclideUri.dirname(prefix);
+    }
+  }
+  return resolved;
+}
+
 export default {
   tempdir,
   tempfile,
@@ -655,6 +761,9 @@ export default {
   chmod,
   chown,
   close,
+  fstat,
+  fsync,
+  ftruncate,
   lstat,
   mkdir,
   mv,
@@ -671,4 +780,8 @@ export default {
   utimes,
   rmdir,
   access,
+
+  findNearestAncestorNamed,
+  resolveRealPath,
+  guessRealPath,
 };

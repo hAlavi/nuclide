@@ -5,21 +5,28 @@
  * This source code is licensed under the license found in the LICENSE file in
  * the root directory of this source tree.
  *
- * @flow
+ * @flow strict-local
  * @format
  */
 
+import {arrayEqual} from 'nuclide-commons/collection';
+import observableFromReduxStore from 'nuclide-commons/observableFromReduxStore';
+import {Observable} from 'rxjs';
 import type {BuckClangCompilationDatabase} from '../../nuclide-buck-rpc/lib/types';
 import type {ClangRequestSettings} from '../../nuclide-clang-rpc/lib/rpc-types';
 import type {ClangConfigurationProvider} from '../../nuclide-clang/lib/types';
 import type {BusySignalService} from 'atom-ide-ui';
 import type {NuclideUri} from 'nuclide-commons/nuclideUri';
-import type {CompilationDatabaseParams, ConsolePrinter} from './types';
+import type {
+  CompilationDatabaseParams,
+  ConsolePrinter,
+  AppState,
+} from './types';
 
+import {SimpleCache} from 'nuclide-commons/SimpleCache';
 import {convertBuckClangCompilationDatabase} from '../../nuclide-buck-rpc/lib/types';
-import {track} from '../../nuclide-analytics';
+import {track} from 'nuclide-analytics';
 import {getBuckServiceByNuclideUri} from '../../nuclide-remote-connection';
-import {Cache} from '../../commons-node/cache';
 import nuclideUri from 'nuclide-commons/nuclideUri';
 import featureConfig from 'nuclide-commons-atom/feature-config';
 import {BuckTaskRunner, CONSOLE_VIEW_URI} from './BuckTaskRunner';
@@ -46,7 +53,7 @@ function constructNotificationOptions(
     {
       text: 'Show in console',
       onDidClick: () => {
-        // eslint-disable-next-line rulesdir/atom-apis
+        // eslint-disable-next-line nuclide-internal/atom-apis
         atom.workspace.open(CONSOLE_VIEW_URI, {searchAllPanes: true});
         if (clickCallback) {
           clickCallback();
@@ -109,11 +116,11 @@ function emitCompilationDbError(
 }
 
 class Provider {
-  _projectRootCache: Cache<string, Promise<?string>> = new Cache();
-  _compilationDBCache: Cache<
+  _projectRootCache: SimpleCache<string, Promise<?string>> = new SimpleCache();
+  _compilationDBCache: SimpleCache<
     string,
     Promise<?BuckClangCompilationDatabase>,
-  > = new Cache();
+  > = new SimpleCache();
 
   _host: NuclideUri;
   _params: CompilationDatabaseParams;
@@ -201,7 +208,7 @@ class Provider {
   }
 }
 
-const providersCache = new Cache({
+const providersCache = new SimpleCache({
   keyFactory: ([host, params: CompilationDatabaseParams]) =>
     JSON.stringify([nuclideUri.getHostnameOpt(host) || '', params]),
   dispose: provider => provider.reset(),
@@ -217,7 +224,10 @@ function getProvider(
   );
 }
 
-const supportsSourceCache: Cache<string, Promise<boolean>> = new Cache();
+const supportsSourceCache: SimpleCache<
+  string,
+  Promise<boolean>,
+> = new SimpleCache();
 
 export function getClangProvider(
   taskRunner: BuckTaskRunner,
@@ -252,6 +262,26 @@ export function getClangProvider(
           buckCompilationDatabase,
         ),
       };
+    },
+    observeClangParams(): Observable<{
+      root: ?NuclideUri,
+      params: CompilationDatabaseParams,
+    }> {
+      return observableFromReduxStore(taskRunner._getStore())
+        .startWith(taskRunner._getStore().getState())
+        .map(({projectRoot}: AppState) => ({
+          root: projectRoot,
+          params: taskRunner.getCompilationDatabaseParamsForCurrentContext(),
+        }))
+        .distinctUntilChanged(
+          (prev, next) =>
+            prev.root === next.root &&
+            arrayEqual(prev.params.args, next.params.args) &&
+            arrayEqual(
+              prev.params.flavorsForTarget,
+              next.params.flavorsForTarget,
+            ),
+        );
     },
     resetForSource(src: string): void {
       const params = taskRunner.getCompilationDatabaseParamsForCurrentContext();

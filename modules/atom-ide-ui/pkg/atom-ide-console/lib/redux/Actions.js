@@ -6,19 +6,18 @@
  * LICENSE file in the root directory of this source tree. An additional grant
  * of patent rights can be found in the PATENTS file in the same directory.
  *
- * @flow
+ * @flow strict-local
  * @format
  */
 
 import type {
   Action,
   Executor,
-  OutputProvider,
-  OutputProviderStatus,
+  ConsoleSourceStatus,
   Record,
   RecordProvider,
   SourceInfo,
-  WatchEditorFunction,
+  Level,
 } from '../types';
 
 import type {CreatePasteFunction} from '../types';
@@ -32,6 +31,7 @@ export const REGISTER_RECORD_PROVIDER = 'REGISTER_RECORD_PROVIDER';
 export const SELECT_EXECUTOR = 'SELECT_EXECUTOR';
 export const SET_MAX_MESSAGE_COUNT = 'SET_MAX_MESSAGE_COUNT';
 export const RECORD_RECEIVED = 'RECORD_RECEIVED';
+export const RECORD_UPDATED = 'RECORD_UPDATED';
 export const REGISTER_SOURCE = 'REGISTER_SOURCE';
 export const REMOVE_SOURCE = 'REMOVE_SOURCE';
 export const UPDATE_STATUS = 'UPDATE_STATUS';
@@ -48,6 +48,18 @@ export function recordReceived(record: Record): Action {
   };
 }
 
+export function recordUpdated(
+  messageId: string,
+  appendText: ?string,
+  overrideLevel: ?Level,
+  setComplete: boolean,
+): Action {
+  return {
+    type: RECORD_UPDATED,
+    payload: {messageId, appendText, overrideLevel, setComplete},
+  };
+}
+
 export function registerExecutor(executor: Executor): Action {
   return {
     type: REGISTER_EXECUTOR,
@@ -60,30 +72,6 @@ export function execute(code: string): Action {
     type: EXECUTE,
     payload: {code},
   };
-}
-
-export function registerOutputProvider(outputProvider: OutputProvider): Action {
-  // Transform the messages into actions and merge them into the action stream.
-  // TODO: Add enabling/disabling of registered source and only subscribe when enabled. That
-  //       way, we won't trigger cold observer side-effects when we don't need the results.
-  return registerRecordProvider({
-    ...outputProvider,
-    records: outputProvider.messages.map(message => ({
-      // We duplicate the properties here instead of using spread because Flow (currently) has some
-      // issues with spread.
-      text: message.text,
-      level: message.level,
-      data: message.data,
-      tags: message.tags,
-      repeatCount: 1,
-
-      kind: 'message',
-      sourceId: outputProvider.id,
-      scopeName: null,
-      // Eventually, we'll want to allow providers to specify custom timestamps for records.
-      timestamp: new Date(),
-    })),
-  });
 }
 
 export function registerRecordProvider(recordProvider: RecordProvider): Action {
@@ -104,12 +92,6 @@ export function unregisterRecordProvider(
   recordProvider: RecordProvider,
 ): Action {
   return removeSource(recordProvider.id);
-}
-
-export function unregisterOutputProvider(
-  outputProvider: OutputProvider,
-): Action {
-  return removeSource(outputProvider.id);
 }
 
 export function selectExecutor(executorId: string): Action {
@@ -139,7 +121,7 @@ export function unregisterExecutor(executor: Executor): Action {
 
 export function updateStatus(
   providerId: string,
-  status: OutputProviderStatus,
+  status: ConsoleSourceStatus,
 ): Action {
   return {
     type: UPDATE_STATUS,
@@ -156,7 +138,9 @@ export function setCreatePasteFunction(
   };
 }
 
-export function setWatchEditor(watchEditor: ?WatchEditorFunction): Action {
+export function setWatchEditor(
+  watchEditor: ?atom$AutocompleteWatchEditor,
+): Action {
   return {
     type: SET_WATCH_EDITOR_FUNCTION,
     payload: {watchEditor},

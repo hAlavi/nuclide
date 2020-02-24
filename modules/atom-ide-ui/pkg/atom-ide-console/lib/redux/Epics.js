@@ -6,7 +6,7 @@
  * LICENSE file in the root directory of this source tree. An additional grant
  * of patent rights can be found in the PATENTS file in the same directory.
  *
- * @flow
+ * @flow strict-local
  * @format
  */
 
@@ -15,9 +15,10 @@ import type {ActionsObservable} from 'nuclide-commons/redux-observable';
 
 import {observableFromSubscribeFunction} from 'nuclide-commons/event';
 import * as Actions from './Actions';
-import getCurrentExecutorId from '../getCurrentExecutorId';
+import * as Selectors from './Selectors';
 import invariant from 'assert';
 import {Observable} from 'rxjs';
+import analytics from 'nuclide-commons/analytics';
 
 /**
  * Register a record provider for every executor.
@@ -34,6 +35,8 @@ export function registerExecutorEpic(
       // $FlowIssue: Flow is having some trouble with the spread here.
       records: executor.output.map(message => ({
         ...message,
+        // $FlowIssue: TODO with above.
+        incomplete: message.incomplete ?? false,
         kind: 'response',
         sourceId: executor.id,
         scopeName: null, // The output won't be in the language's grammar.
@@ -55,7 +58,7 @@ export function executeEpic(
   return actions.ofType(Actions.EXECUTE).flatMap(action => {
     invariant(action.type === Actions.EXECUTE);
     const {code} = action.payload;
-    const currentExecutorId = getCurrentExecutorId(store.getState());
+    const currentExecutorId = Selectors.getCurrentExecutorId(store.getState());
     // flowlint-next-line sketchy-null-string:off
     invariant(currentExecutorId);
 
@@ -70,12 +73,13 @@ export function executeEpic(
           // Eventually, we'll want to allow providers to specify custom timestamps for records.
           timestamp: new Date(),
           sourceId: currentExecutorId,
+          sourceName: executor.name,
           kind: 'request',
           level: 'log',
           text: code,
-          scopeName: executor.scopeName,
-          data: null,
+          scopeName: executor.scopeName(),
           repeatCount: 1,
+          incomplete: false,
         }),
       )
         // Execute the code as a side-effect.
@@ -84,6 +88,17 @@ export function executeEpic(
         })
     );
   });
+}
+
+export function trackEpic(
+  actions: ActionsObservable<Action>,
+  store: Store,
+): Observable<empty> {
+  return actions
+    .ofType(Actions.EXECUTE)
+    .map(action => ({type: 'console:execute'}))
+    .do(analytics.trackEvent)
+    .ignoreElements();
 }
 
 export function registerRecordProviderEpic(
@@ -101,6 +116,7 @@ export function registerRecordProviderEpic(
 
     // TODO: Can this be delayed until sometime after registration?
     const statusActions =
+      // $FlowFixMe(>=0.68.0) Flow suppress (T27187857)
       typeof recordProvider.observeStatus === 'function'
         ? observableFromSubscribeFunction(recordProvider.observeStatus).map(
             status => Actions.updateStatus(recordProvider.id, status),

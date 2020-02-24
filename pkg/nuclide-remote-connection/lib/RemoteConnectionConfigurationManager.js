@@ -5,22 +5,33 @@
  * This source code is licensed under the license found in the LICENSE file in
  * the root directory of this source tree.
  *
- * @flow
+ * @flow strict-local
  * @format
  */
 
 /* global localStorage */
 
-import type {ServerConnectionConfiguration} from './ServerConnection';
+import type {
+  ServerConnectionConfiguration,
+  ServerConnectionVersion,
+} from './ServerConnection';
 
 import crypto from 'crypto';
 import invariant from 'assert';
 import {getLogger} from 'log4js';
-import keytarWrapper from '../../commons-node/keytarWrapper';
+import * as keytar from 'nuclide-prebuilt-libs/keytar';
+import electron from 'electron';
 
 const CONFIG_DIR = 'nuclide-connections';
-
 const logger = getLogger('nuclide-remote-connection');
+const remote = electron.remote;
+const ipc = electron.ipcRenderer;
+
+invariant(remote);
+invariant(ipc);
+
+export const SERVER_CONFIG_RESPONSE_EVENT = 'server-config-response';
+export const SERVER_CONFIG_REQUEST_EVENT = 'server-config-request';
 
 /**
  * Version of ServerConnectionConfiguration that uses string instead of Buffer for fields so it can
@@ -30,10 +41,10 @@ type SerializableServerConnectionConfiguration = {
   host: string,
   port: number,
   family?: 4 | 6,
-  certificateAuthorityCertificate?: string,
+  certificateAuthorityCertificate?: string | Array<string>,
   clientCertificate?: string,
   clientKey?: string,
-  version?: number,
+  version?: ServerConnectionVersion,
 };
 
 // Insecure configs are used for testing only.
@@ -49,6 +60,58 @@ function getStorageKey(host: string): string {
   return `${CONFIG_DIR}:${host}`;
 }
 
+async function getConnectionConfigViaIPC(
+  host: string,
+): Promise<?ServerConnectionConfiguration> {
+  const thisWindowsId = remote.getCurrentWindow().id;
+  const otherWindows = remote.BrowserWindow.getAllWindows().filter(
+    win => win.isVisible() && win.id !== thisWindowsId,
+  );
+  const timeoutInMilliseconds = 5000;
+
+  return new Promise(resolve => {
+    if (otherWindows.length === 0) {
+      resolve(null);
+      return;
+    }
+
+    let responseCount = 0;
+
+    // set a timeout to remove all listeners and resolve if
+    // we don't get responses in some fixed amount of time
+    const timeout = setTimeout(() => {
+      logger.error('timed out waiting for ipc response(s) from other windows');
+      resolve(null);
+      ipc.removeAllListeners(SERVER_CONFIG_RESPONSE_EVENT);
+    }, timeoutInMilliseconds);
+
+    ipc.on(
+      SERVER_CONFIG_RESPONSE_EVENT,
+      (event, config: ?ServerConnectionConfiguration) => {
+        responseCount++;
+
+        if (config != null || responseCount === otherWindows.length) {
+          if (config != null) {
+            logger.info('received the config! removing other listeners');
+          }
+          resolve(config);
+          clearTimeout(timeout);
+          ipc.removeAllListeners(SERVER_CONFIG_RESPONSE_EVENT);
+        }
+      },
+    );
+
+    otherWindows.forEach(window => {
+      logger.info(`requesting config from window ${window.id}`);
+
+      // NOTE: I tried using sendTo here but it wasn't working well
+      // (seemed like it was flaky). It might be worth trying it
+      // again after we upgrade electron
+      window.webContents.send(SERVER_CONFIG_REQUEST_EVENT, host, thisWindowsId);
+    });
+  });
+}
+
 export async function getConnectionConfig(
   host: string,
 ): Promise<?ServerConnectionConfiguration> {
@@ -60,7 +123,11 @@ export async function getConnectionConfig(
     return await decryptConfig(JSON.parse(storedConfig));
   } catch (e) {
     logger.error(`The configuration file for ${host} is corrupted.`, e);
-    return null;
+
+    logger.info('falling back to getting the config via ipc');
+    const config = await getConnectionConfigViaIPC(host);
+
+    return config;
   }
 }
 
@@ -113,22 +180,25 @@ async function encryptConfig(
   invariant(clientKey);
   const realClientKey = clientKey.toString(); // Convert from Buffer to string.
   const {salt, password, encryptedString} = encryptString(realClientKey);
-  await keytarWrapper.replacePassword(
-    'nuclide.remoteProjectConfig',
-    sha1sum,
-    password,
-  );
+  await keytar.setPassword('nuclide.remoteProjectConfig', sha1sum, password);
 
   const clientKeyWithSalt = encryptedString + '.' + salt;
 
   invariant(certificateAuthorityCertificate);
   invariant(clientCertificate);
 
+  let ca: Array<string> | string = [];
+  if (Array.isArray(certificateAuthorityCertificate)) {
+    ca = certificateAuthorityCertificate;
+  } else {
+    ca = certificateAuthorityCertificate.toString();
+  }
+
   return {
     host: remoteProjectConfig.host,
     port: remoteProjectConfig.port,
     family: remoteProjectConfig.family,
-    certificateAuthorityCertificate: certificateAuthorityCertificate.toString(),
+    certificateAuthorityCertificate: ca,
     clientCertificate: clientCertificate.toString(),
     clientKey: clientKeyWithSalt,
     version: remoteProjectConfig.version,
@@ -147,7 +217,7 @@ async function decryptConfig(
   sha1.update(`${remoteProjectConfig.host}:${remoteProjectConfig.port}`);
   const sha1sum = sha1.digest('hex');
 
-  const password = await keytarWrapper.getPassword(
+  const password = await keytar.getPassword(
     'nuclide.remoteProjectConfig',
     sha1sum,
   );
@@ -170,26 +240,22 @@ async function decryptConfig(
   }
 
   const restoredClientKey = decryptString(encryptedString, password, salt);
-  // "nolint" is to suppress ArcanistPrivateKeyLinter errors
-  if (
-    !restoredClientKey.startsWith('-----BEGIN RSA PRIVATE KEY-----') // nolint
-  ) {
-    getLogger('nuclide-remote-connection').error(
-      `decrypted client key did not start with expected header: ${restoredClientKey}`,
-    );
-  }
 
   // flowlint-next-line sketchy-null-string:off
   invariant(certificateAuthorityCertificate);
   // flowlint-next-line sketchy-null-string:off
   invariant(clientCertificate);
+
+  let ca = certificateAuthorityCertificate;
+  if (!Array.isArray(ca)) {
+    ca = new Buffer(ca);
+  }
+
   return {
     host: remoteProjectConfig.host,
     port: remoteProjectConfig.port,
     family: remoteProjectConfig.family,
-    certificateAuthorityCertificate: new Buffer(
-      certificateAuthorityCertificate,
-    ),
+    certificateAuthorityCertificate: ca,
     clientCertificate: new Buffer(clientCertificate),
     clientKey: new Buffer(restoredClientKey),
     version: remoteProjectConfig.version,

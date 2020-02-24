@@ -5,12 +5,19 @@
  * This source code is licensed under the license found in the LICENSE file in
  * the root directory of this source tree.
  *
- * @flow
+ * @flow strict-local
  * @format
  */
 
 import type {NuclideUri} from 'nuclide-commons/nuclideUri';
-import type {Action, TaskRunner, TaskRunnerState, TaskStatus} from '../types';
+import type {
+  Action,
+  TaskRunner,
+  TaskRunnerState,
+  TaskStatus,
+  TaskOutcome,
+} from '../types';
+import textFromOutcomeAction from './textFromOutcomeAction';
 import type {ConsoleApi, ConsoleService} from 'atom-ide-ui';
 
 import * as Actions from './Actions';
@@ -132,11 +139,31 @@ export function runningTask(
       return null;
     case Actions.TASK_PROGRESS:
       return {...state, progress: action.payload.progress};
+    case Actions.TASK_STATUS:
+      return {...state, status: action.payload.status};
     case Actions.TASK_ERRORED:
       return null;
     case Actions.TASK_STARTED:
       return action.payload.taskStatus;
     case Actions.TASK_STOPPED:
+      return null;
+    default:
+      return state;
+  }
+}
+
+export function mostRecentTaskOutcome(
+  state: ?TaskOutcome = null,
+  action: Action,
+): ?TaskOutcome {
+  switch (action.type) {
+    case Actions.TASK_COMPLETED:
+      return {type: 'success', message: textFromOutcomeAction(action)};
+    case Actions.TASK_ERRORED:
+      return {type: 'error', message: textFromOutcomeAction(action)};
+    case Actions.TASK_STOPPED:
+      return {type: 'cancelled', message: textFromOutcomeAction(action)};
+    case Actions.TASK_STARTED:
       return null;
     default:
       return state;

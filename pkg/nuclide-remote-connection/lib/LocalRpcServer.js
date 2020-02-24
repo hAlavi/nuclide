@@ -5,13 +5,13 @@
  * This source code is licensed under the license found in the LICENSE file in
  * the root directory of this source tree.
  *
- * @flow
+ * @flow strict-local
  * @format
  */
 
 import child_process from 'child_process';
 import {getLogger} from 'log4js';
-import {track} from '../../nuclide-analytics';
+import {track} from 'nuclide-analytics';
 import {getServerSideMarshalers} from '../../nuclide-marshalers-common';
 import servicesConfig from '../../nuclide-server/lib/servicesConfig';
 import {RpcConnection, ServiceRegistry} from '../../nuclide-rpc';
@@ -45,6 +45,15 @@ process.on('exit', () => {
       handle.kill();
     }
   });
+});
+
+// According to https://nodejs.org/api/process.html#process_signal_events,
+// Node.js should ignore SIGPIPE by default.
+// However, we've seen reports in production of users getting SIGPIPE
+// from their LocalRpcServer processes. Let's try to find out why...
+process.on('SIGPIPE', () => {
+  // Wrap in an Error to get a stack trace.
+  logger.error(Error('Received unexpected SIGPIPE, ignoring...'));
 });
 
 // If we started this with --inspect, don't pass that on to the children.

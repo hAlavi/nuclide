@@ -10,39 +10,41 @@
  * @format
  */
 
-import type {
-  Level,
-  Record,
-  DisplayableRecord,
-  Executor,
-  OutputProvider,
-} from '../types';
+import type {Level, Record} from '../types';
+import type {RenderSegmentProps} from 'nuclide-commons-ui/Ansi';
 
 import classnames from 'classnames';
 import {MeasuredComponent} from 'nuclide-commons-ui/MeasuredComponent';
 import * as React from 'react';
-import {LazyNestedValueComponent} from 'nuclide-commons-ui/LazyNestedValueComponent';
+
+// TODO: Fix lint rule, this is in the same package!
+// eslint-disable-next-line nuclide-internal/modules-dependencies
+import {ExpressionTreeComponent} from 'atom-ide-ui';
 import SimpleValueComponent from 'nuclide-commons-ui/SimpleValueComponent';
+import FullWidthProgressBar from 'nuclide-commons-ui/FullWidthProgressBar';
 import shallowEqual from 'shallowequal';
-import {TextRenderer} from 'nuclide-commons-ui/TextRenderer';
+import Ansi from 'nuclide-commons-ui/Ansi';
 import debounce from 'nuclide-commons/debounce';
-import {nextAnimationFrame} from 'nuclide-commons/observable';
-import {URL_REGEX} from 'nuclide-commons/string';
-import featureConfig from 'nuclide-commons-atom/feature-config';
+import parseText from '../parseText';
+import nullthrows from 'nullthrows';
 
 type Props = {
-  displayableRecord: DisplayableRecord,
+  record: Record,
   showSourceLabel: boolean,
-  getExecutor: (id: string) => ?Executor,
-  getProvider: (id: string) => ?OutputProvider,
-  onHeightChange: (recordId: number, newHeight: number) => void,
+  onHeightChange: (record: Record, newHeight: number) => void,
+  expansionStateId: Object,
 };
+
+const AnsiRenderSegment = ({key, style, content}: RenderSegmentProps) => (
+  <span key={key} style={style} className="nuclide-console-default-text-colors">
+    {parseText(content)}
+  </span>
+);
 
 const ONE_DAY = 1000 * 60 * 60 * 24;
 export default class RecordView extends React.Component<Props> {
   _wrapper: ?HTMLElement;
   _debouncedMeasureAndNotifyHeight: () => void;
-  _rafDisposable: ?rxjs$Subscription;
 
   constructor(props: Props) {
     super(props);
@@ -62,28 +64,34 @@ export default class RecordView extends React.Component<Props> {
     this.measureAndNotifyHeight();
   }
 
-  componentWillUnmount() {
-    if (this._rafDisposable != null) {
-      this._rafDisposable.unsubscribe();
+  componentDidUpdate(prevProps: Props) {
+    // Record is an immutable object, so any change that would affect a height
+    // change should result in us getting a new object.
+    if (this.props.record !== prevProps.record) {
+      this.measureAndNotifyHeight();
     }
   }
 
-  _renderContent(displayableRecord: DisplayableRecord): React.Element<any> {
-    const {record} = displayableRecord;
+  componentWillUnmount() {
+    this._debouncedMeasureAndNotifyHeight.dispose();
+  }
+
+  _renderContent(): React.Element<any> {
+    const {record} = this.props;
     if (record.kind === 'request') {
       // TODO: We really want to use a text editor to render this so that we can get syntax
       // highlighting, but they're just too expensive. Figure out a less-expensive way to get syntax
       // highlighting.
       return <pre>{record.text || ' '}</pre>;
-    } else if (record.kind === 'response') {
-      const executor = this.props.getExecutor(record.sourceId);
-      return this._renderNestedValueComponent(displayableRecord, executor);
-    } else if (record.data != null) {
-      const provider = this.props.getProvider(record.sourceId);
-      return this._renderNestedValueComponent(displayableRecord, provider);
+    } else if (record.expressions != null) {
+      return this._renderNestedValueComponent();
     } else {
       // If there's not text, use a space to make sure the row doesn't collapse.
       const text = record.text || ' ';
+
+      if (record.format === 'ansi') {
+        return <Ansi renderSegment={AnsiRenderSegment}>{text}</Ansi>;
+      }
       return <pre>{parseText(text)}</pre>;
     }
   }
@@ -92,34 +100,49 @@ export default class RecordView extends React.Component<Props> {
     return !shallowEqual(this.props, nextProps);
   }
 
-  _renderNestedValueComponent(
-    displayableRecord: DisplayableRecord,
-    provider: ?OutputProvider | ?Executor,
-  ): React.Element<any> {
-    const {record, expansionStateId} = displayableRecord;
-    const getProperties = provider == null ? null : provider.getProperties;
-    const type = record.data == null ? null : record.data.type;
-    const simpleValueComponent = getComponent(type);
-    return (
-      <LazyNestedValueComponent
-        className="console-lazy-nested-value"
-        evaluationResult={record.data}
-        fetchChildren={getProperties}
-        simpleValueComponent={simpleValueComponent}
-        shouldCacheChildren={true}
-        expansionStateId={expansionStateId}
-      />
+  _renderNestedValueComponent(): React.Element<any> {
+    const {record, expansionStateId} = this.props;
+    const expressions = nullthrows(record.expressions);
+
+    // Render multiple objects.
+    const children = [];
+    for (const expression of expressions) {
+      if (!expression.hasChildren()) {
+        children.push(
+          <SimpleValueComponent
+            hideExpressionName={true}
+            expression={expression}
+          />,
+        );
+      } else {
+        children.push(
+          <ExpressionTreeComponent
+            className="console-expression-tree-value"
+            expression={expression}
+            containerContext={expansionStateId}
+            hideExpressionName={true}
+          />,
+        );
+      }
+    }
+    return children.length <= 1 ? (
+      children[0]
+    ) : (
+      <span className="console-multiple-objects">{children}</span>
     );
   }
 
   render(): React.Node {
-    const {displayableRecord} = this.props;
-    const {record} = displayableRecord;
-    const {level, kind, timestamp, sourceId} = record;
+    const {record} = this.props;
+    const {level, kind, timestamp, sourceId, sourceName} = record;
 
     const classNames = classnames('console-record', `level-${level || 'log'}`, {
       request: kind === 'request',
       response: kind === 'response',
+      // Allow native keybindings for text-only nodes. The ExpressionTreeComponent
+      // will handle keybindings for expression nodes.
+      'native-key-bindings':
+        record.expressions == null || record.expressions.length === 0,
     });
 
     const iconName = getIconName(record);
@@ -130,7 +153,7 @@ export default class RecordView extends React.Component<Props> {
         className={`console-record-source-label ${getHighlightClassName(
           level,
         )}`}>
-        {sourceId}
+        {sourceName ?? sourceId}
       </span>
     ) : null;
     let renderedTimestamp;
@@ -147,62 +170,40 @@ export default class RecordView extends React.Component<Props> {
       <MeasuredComponent
         onMeasurementsChanged={this._debouncedMeasureAndNotifyHeight}>
         {/* $FlowFixMe(>=0.53.0) Flow suppress */}
-        <div ref={this._handleRecordWrapper} className={classNames}>
+        <div
+          ref={this._handleRecordWrapper}
+          className={classNames}
+          tabIndex="0">
           {icon}
           <div className="console-record-content-wrapper">
-            {displayableRecord.record.repeatCount > 1 && (
+            {record.repeatCount > 1 && (
               <div className="console-record-duplicate-number">
-                {displayableRecord.record.repeatCount}
+                {record.repeatCount}
               </div>
             )}
             <div className="console-record-content">
-              {this._renderContent(displayableRecord)}
+              {this._renderContent()}
             </div>
           </div>
           {sourceLabel}
           {renderedTimestamp}
+          {<FullWidthProgressBar progress={null} visible={record.incomplete} />}
         </div>
       </MeasuredComponent>
     );
   }
 
   measureAndNotifyHeight = () => {
-    // This method is called after the necessary DOM mutations have
-    // already occurred, however it is possible that the updates have
-    // not been flushed to the screen. So the height change update
-    // is deferred until the rendering is complete so that
-    // this._wrapper.offsetHeight gives us the correct final height
-    if (this._rafDisposable != null) {
-      this._rafDisposable.unsubscribe();
+    if (this._wrapper == null) {
+      return;
     }
-    this._rafDisposable = nextAnimationFrame.subscribe(() => {
-      if (this._wrapper == null) {
-        return;
-      }
-      const {offsetHeight} = this._wrapper;
-      const {displayableRecord, onHeightChange} = this.props;
-      if (offsetHeight !== displayableRecord.height) {
-        onHeightChange(displayableRecord.id, offsetHeight);
-      }
-    });
+    const {offsetHeight} = this._wrapper;
+    this.props.onHeightChange(this.props.record, offsetHeight);
   };
 
   _handleRecordWrapper = (wrapper: HTMLElement) => {
     this._wrapper = wrapper;
   };
-}
-
-function getComponent(type: ?string): React.ComponentType<any> {
-  switch (type) {
-    case 'text':
-      return props => TextRenderer(props.evaluationResult);
-    case 'boolean':
-    case 'string':
-    case 'number':
-    case 'object':
-    default:
-      return SimpleValueComponent;
-  }
 }
 
 function getHighlightClassName(level: Level): string {
@@ -237,81 +238,4 @@ function getIconName(record: Record): ?string {
     case 'error':
       return 'stop';
   }
-}
-
-/**
- * Parse special entities into links. In the future, it would be great to add a service so that we
- * could add new clickable things and to allow providers to mark specific ranges as links to things
- * that only they can know (e.g. relative paths output in BUCK messages). For now, however, we'll
- * just use some pattern settings and hardcode the patterns we care about.
- */
-function parseText(text: string): Array<string | React.Element<any>> {
-  const chunks = [];
-  let lastIndex = 0;
-  let index = 0;
-  while (true) {
-    const match = CLICKABLE_RE.exec(text);
-    if (match == null) {
-      break;
-    }
-
-    const matchedText = match[0];
-
-    // Add all the text since our last match.
-    chunks.push(
-      text.slice(lastIndex, CLICKABLE_RE.lastIndex - matchedText.length),
-    );
-    lastIndex = CLICKABLE_RE.lastIndex;
-
-    let href;
-    if (match[1] != null) {
-      // It's a diff
-      const url = toString(
-        featureConfig.get('atom-ide-console.diffUrlPattern'),
-      );
-      if (url !== '') {
-        href = url.replace('%s', matchedText);
-      }
-    } else if (match[2] != null) {
-      // It's a task
-      const url = toString(
-        featureConfig.get('atom-ide-console.taskUrlPattern'),
-      );
-      if (url !== '') {
-        href = url.replace('%s', matchedText.slice(1));
-      }
-    } else if (match[3] != null) {
-      // It's a URL
-      href = matchedText;
-    }
-
-    chunks.push(
-      // flowlint-next-line sketchy-null-string:off
-      href ? (
-        <a key={`r${index}`} href={href} target="_blank">
-          {matchedText}
-        </a>
-      ) : (
-        matchedText
-      ),
-    );
-
-    index++;
-  }
-
-  // Add any remaining text.
-  chunks.push(text.slice(lastIndex));
-
-  return chunks;
-}
-
-const DIFF_PATTERN = '\\b[dD][1-9][0-9]{5,}\\b';
-const TASK_PATTERN = '\\b[tT]\\d+\\b';
-const CLICKABLE_PATTERNS = `(${DIFF_PATTERN})|(${TASK_PATTERN})|${
-  URL_REGEX.source
-}`;
-const CLICKABLE_RE = new RegExp(CLICKABLE_PATTERNS, 'g');
-
-function toString(value: mixed): string {
-  return typeof value === 'string' ? value : '';
 }

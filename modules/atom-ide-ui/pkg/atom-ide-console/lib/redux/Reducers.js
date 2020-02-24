@@ -6,7 +6,7 @@
  * LICENSE file in the root directory of this source tree. An additional grant
  * of patent rights can be found in the PATENTS file in the same directory.
  *
- * @flow
+ * @flow strict-local
  * @format
  */
 
@@ -19,6 +19,7 @@ import * as Actions from './Actions';
 const RECORD_PROPERTIES_TO_COMPARE = [
   'text',
   'level',
+  'format',
   'scopeName',
   'sourceId',
   'kind',
@@ -38,12 +39,20 @@ function shouldAccumulateRecordCount(
   ) {
     return false;
   }
+
+  // Never merge incomplete records.
+  if (recordA.incomplete || recordB.incomplete) {
+    return false;
+  }
+
   const areRelevantPropertiesEqual = RECORD_PROPERTIES_TO_COMPARE.every(
     prop => recordA[prop] === recordB[prop],
   );
 
   // if data exists, we should not accumulate this into the previous record
-  const doesDataExist = recordA.data || recordB.data;
+  const doesDataExist =
+    (recordA.expressions && recordA.expressions.length > 0) ||
+    (recordB.expressions && recordB.expressions.length > 0);
 
   const recATags = recordA.tags;
   const recBTags = recordB.tags;
@@ -65,34 +74,87 @@ export default function accumulateState(
   switch (action.type) {
     case Actions.RECORD_RECEIVED: {
       const {record} = action.payload;
-      let nextRecords = state.records;
+      let {records, incompleteRecords} = state;
 
-      // check if the message is exactly the same as the previous one, if so
-      // we add a count to it.
-      const lastRecord = nextRecords.last();
-      if (
-        lastRecord != null &&
-        shouldAccumulateRecordCount(lastRecord, record)
-      ) {
-        // Update the last record. Don't use `splice()` because that's O(n)
-        const updatedRecord: Record = {
-          ...lastRecord,
-          repeatCount: lastRecord.repeatCount + 1,
-          timestamp: record.timestamp,
-        };
-        nextRecords = nextRecords.pop().push(updatedRecord);
+      if (record.incomplete) {
+        incompleteRecords = incompleteRecords.push(record);
       } else {
-        nextRecords = nextRecords.push(record);
-      }
+        // check if the message is exactly the same as the previous one, if so
+        // we add a count to it.
+        const lastRecord = records.last();
+        if (
+          lastRecord != null &&
+          shouldAccumulateRecordCount(lastRecord, record)
+        ) {
+          // Update the last record. Don't use `splice()` because that's O(n)
+          const updatedRecord: Record = {
+            ...lastRecord,
+            repeatCount: lastRecord.repeatCount + 1,
+            timestamp: record.timestamp,
+          };
+          records = records.pop().push(updatedRecord);
+        } else {
+          records = records.push(record);
+        }
 
-      if (nextRecords.size > state.maxMessageCount) {
-        // We could only have gone over by one.
-        nextRecords = nextRecords.shift();
+        if (records.size > state.maxMessageCount) {
+          // We could only have gone over by one.
+          records = records.shift();
+        }
       }
 
       return {
         ...state,
-        records: nextRecords,
+        records,
+        incompleteRecords,
+      };
+    }
+    case Actions.RECORD_UPDATED: {
+      let {records, incompleteRecords} = state;
+      const {
+        messageId,
+        appendText,
+        overrideLevel,
+        setComplete,
+      } = action.payload;
+
+      let found = false;
+      for (let i = 0; i < incompleteRecords.size; i++) {
+        const record = incompleteRecords.get(i);
+        if (record != null && record.messageId === messageId) {
+          // Create a replacement message object with the new properties.
+          const newRecord = {
+            ...record,
+            text: appendText != null ? record.text + appendText : record.text,
+            level: overrideLevel != null ? overrideLevel : record.level,
+            incomplete: !setComplete,
+          };
+
+          if (setComplete) {
+            incompleteRecords = incompleteRecords.remove(i);
+            records = records.push(newRecord);
+            if (records.size > state.maxMessageCount) {
+              records = records.shift();
+            }
+          } else {
+            incompleteRecords = incompleteRecords.set(i, newRecord);
+          }
+
+          found = true;
+          break;
+        }
+      }
+
+      if (!found) {
+        throw new Error(
+          `Expected incomplete console message with id ${messageId} not found`,
+        );
+      }
+
+      return {
+        ...state,
+        records,
+        incompleteRecords,
       };
     }
     case Actions.SET_MAX_MESSAGE_COUNT: {
@@ -163,9 +225,13 @@ export default function accumulateState(
     }
     case Actions.EXECUTE: {
       const command = action.payload.code;
+      const newHistory =
+        state.history[state.history.length - 1] === command
+          ? state.history
+          : state.history.concat(command);
       return {
         ...state,
-        history: state.history.concat(command).slice(-1000),
+        history: newHistory.slice(-1000),
       };
     }
     case Actions.SET_CREATE_PASTE_FUNCTION: {

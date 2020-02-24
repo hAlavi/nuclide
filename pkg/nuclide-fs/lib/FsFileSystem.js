@@ -5,7 +5,7 @@
  * This source code is licensed under the license found in the LICENSE file in
  * the root directory of this source tree.
  *
- * @flow
+ * @flow strict-local
  * @format
  */
 
@@ -108,7 +108,6 @@ export class FsFileSystem implements FileSystem {
       }),
     );
     // TODO: Return entries directly and change client to handle error.
-    // $FlowFixMe
     return arrayCompact(entries).map(entry => {
       return [entry.file, entry.stats.isFile(), entry.isSymbolicLink];
     });
@@ -127,6 +126,14 @@ export class FsFileSystem implements FileSystem {
 
   copy(sourcePath: NuclideUri, destinationPath: NuclideUri): Promise<void> {
     return fsPromise.copy(sourcePath, destinationPath);
+  }
+
+  symlink(
+    source: NuclideUri,
+    target: NuclideUri,
+    type?: string,
+  ): Promise<void> {
+    return fsPromise.symlink(source, target, type);
   }
 
   rimraf(path: NuclideUri): Promise<void> {

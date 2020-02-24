@@ -5,18 +5,19 @@
  * This source code is licensed under the license found in the LICENSE file in
  * the root directory of this source tree.
  *
- * @flow
+ * @flow strict-local
  * @format
  */
 
-import type {search$FileResult, CodeSearchResult} from './types';
+import type {
+  search$FileResult,
+  CodeSearchResult,
+  CodeSearchTool,
+} from './types';
 import type {NuclideUri} from 'nuclide-commons/nuclideUri';
 
-import {
-  resolveTool,
-  searchInDirectory,
-  searchInDirectories,
-} from './searchInDirectory';
+import {resolveTool, searchWithTool} from './searchTools';
+import {searchInDirectory, searchInDirectories} from './searchInDirectory';
 import {
   isFuse,
   isNfs,
@@ -34,11 +35,7 @@ export async function isEligibleForDirectory(
     isNfs(rootDirectory),
     isFuse(rootDirectory),
   ]);
-  if (checks.some(x => x)) {
-    return false;
-  }
-
-  return true;
+  return !checks.some(x => x);
 }
 
 /**
@@ -54,82 +51,103 @@ export function codeSearch(
   directory: NuclideUri,
   regex: RegExp,
   useVcsSearch: boolean,
-  tool: ?string,
+  tool: ?CodeSearchTool,
   maxResults: number,
 ): ConnectableObservable<CodeSearchResult> {
-  return searchInDirectory(directory, regex, tool, useVcsSearch)
+  return searchInDirectory(tool, useVcsSearch, {
+    regex,
+    directory,
+    recursive: true,
+  })
     .take(maxResults)
     .publish();
 }
 
 /**
- * Searches for all instances of a pattern in subdirectories.
- * @param directory - The directory in which to perform a search.
+ * @param files - The files in which to perform a search.
  * @param regex - The pattern to match.
- * @param subdirs - An array of subdirectories to search within `directory`. If subdirs is an
- *   empty array, then simply search in directory.
- * @param useVcsSearch - Whether to try to use hg/git grep to find the pattern.
  * @param tool - Which tool to use from POSIX_TOOLS or WINDOWS_TOOLS,
  *   default to first one available.
+ * @param maxResults - Maximum number of results to emit.
+ * @returns An observable that emits results.
+ */
+export function searchFiles(
+  files: Array<NuclideUri>,
+  regex: RegExp,
+  tool: ?CodeSearchTool,
+  leadingLines?: number,
+  trailingLines?: number,
+  maxResults?: number,
+): ConnectableObservable<CodeSearchResult> {
+  return searchWithTool(tool, {
+    recursive: false,
+    files,
+    regex,
+    leadingLines,
+    trailingLines,
+    limit: maxResults,
+  }).publish();
+}
+
+/**
+ * Searches for all instances of a pattern in subdirectories.
  * @returns An observable that emits match events.
  */
 export function remoteAtomSearch(
+  // The directory in which to perform a search.
   directory: NuclideUri,
+  // The pattern to match.
   regex: RegExp,
+  // An array of subdirectories to search within `directory`. If subdirs is an
+  // empty array, then simply search in directory.
   subdirs: Array<string>,
+  // Whether to try to use hg/git grep to find the pattern.
   useVcsSearch: boolean,
-  tool: ?string,
+  // Which tool to use from POSIX_TOOLS or WINDOWS_TOOLS,
+  // default to first one available.
+  tool: ?CodeSearchTool,
+  // Number of leading context lines to include.
+  leadingLines?: ?number,
+  // Number of trailing context lines to include.
+  trailingLines?: ?number,
 ): ConnectableObservable<search$FileResult> {
   return mergeSearchResults(
-    searchInDirectories(directory, regex, subdirs, useVcsSearch, tool),
-    regex,
+    searchInDirectories(subdirs, tool, useVcsSearch, {
+      regex,
+      leadingLines,
+      trailingLines,
+      recursive: true,
+      directory,
+    }),
   ).publish();
 }
 
 // Convert CodeSearchResults into search$FileResult.
 function mergeSearchResults(
   codeSearchResults: Observable<CodeSearchResult>,
-  regex: RegExp,
 ): Observable<search$FileResult> {
   const results = codeSearchResults
-    .flatMap((searchResult: CodeSearchResult) => {
-      const {file, row, line} = searchResult;
-
-      // Try to extract all actual "matched" texts on the same line.
-      const result = [];
-      // Loop through each matched text on a line
-      let matchTextResult;
-      // Note: Atom will auto-insert 'g' flag, so, we can loop through all matches.
-      while ((matchTextResult = regex.exec(line)) != null) {
-        const matchText = matchTextResult[0];
-        const matchIndex = matchTextResult.index;
-        // Some invalid regex (e.g. /||/g) will always match,
-        // but with an empty match string, so the exec loop becomes infinite.
-        // Check for this case and abort early.
-        if (matchText.length === 0) {
-          break;
-        }
-        result.push({
-          filePath: file,
-          match: {
-            lineText: line,
-            lineTextOffset: 0,
-            matchText,
-            range: [[row, matchIndex], [row, matchIndex + matchText.length]],
-          },
-        });
-
-        // Handle corner case if 'g' flag is not provided
-        if (!regex.global) {
-          break;
-        }
-      }
-
-      // IMPORTANT: reset the regex for the next search
-      regex.lastIndex = 0;
-
-      return result;
-    })
+    .map(
+      ({
+        file,
+        row,
+        line,
+        column,
+        matchLength,
+        leadingContext,
+        trailingContext,
+      }) => ({
+        filePath: file,
+        match: {
+          lineText: line,
+          lineTextOffset: 0,
+          matchText: line.slice(column, column + matchLength),
+          range: [[row, column], [row, column + matchLength]],
+          leadingContextLines: leadingContext,
+          trailingContextLines: trailingContext,
+        },
+      }),
+    )
     .share();
 
   return (

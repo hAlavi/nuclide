@@ -5,7 +5,7 @@
  * This source code is licensed under the license found in the LICENSE file in
  * the root directory of this source tree.
  *
- * @flow
+ * @flow strict-local
  * @format
  */
 
@@ -28,6 +28,7 @@ import type {
   StopTaskAction,
   TaskMetadata,
   TaskRunner,
+  TaskOptions,
   TaskRunnerState,
   ToggleToolbarVisibilityAction,
   UnregisterTaskRunnerAction,
@@ -53,6 +54,7 @@ export const STOP_TASK = 'STOP_TASK';
 export const TASKS_READY = 'TASKS_READY';
 export const TASK_COMPLETED = 'TASK_COMPLETED';
 export const TASK_PROGRESS = 'TASK_PROGRESS';
+export const TASK_STATUS = 'TASK_STATUS';
 export const TASK_MESSAGE = 'TASK_MESSAGE';
 export const TASK_STARTED = 'TASK_STARTED';
 export const TASK_STOPPED = 'TASK_STOPPED';
@@ -74,7 +76,9 @@ export function registerTaskRunner(
 }
 
 export function runTask(
-  taskMeta: TaskMetadata & {taskRunner: TaskRunner},
+  taskRunner: TaskRunner,
+  taskMeta: TaskMetadata,
+  options: ?TaskOptions,
   verifySaved: boolean = true,
 ): RunTaskAction {
   return {
@@ -82,6 +86,8 @@ export function runTask(
     payload: {
       verifySaved,
       taskMeta,
+      taskRunner,
+      options,
     },
   };
 }

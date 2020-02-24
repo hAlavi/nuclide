@@ -16,10 +16,10 @@
  * to minimize the impact on reload times.
  */
 
-import typeof * as babelTypes from 'babel-types';
+import typeof * as babelTypes from '@babel/types';
 // This is in devDependencies. This file is only reachable in dev mode.
-// eslint-disable-next-line rulesdir/no-unresolved
-import typeof * as babelGenerator from 'babel-generator';
+// eslint-disable-next-line nuclide-internal/no-unresolved
+import typeof * as babelGenerator from '@babel/generator';
 
 import type {
   Definitions,
@@ -27,7 +27,6 @@ import type {
   NamedType,
   Type,
   InterfaceDefinition,
-  Parameter,
 } from './types';
 
 export default function createProxyGenerator(
@@ -35,9 +34,6 @@ export default function createProxyGenerator(
   generate: babelGenerator,
 ) {
   const thenIdent = t.identifier('then');
-
-  const observableIdentifier = t.identifier('Observable');
-  const idIdentifier = t.identifier('id');
 
   const moduleDotExportsExpression = t.memberExpression(
     t.identifier('module'),
@@ -53,10 +49,6 @@ export default function createProxyGenerator(
   const callRemoteMethodExpression = t.memberExpression(
     clientIdentifier,
     t.identifier('callRemoteMethod'),
-  );
-  const createRemoteObjectExpression = t.memberExpression(
-    clientIdentifier,
-    t.identifier('createRemoteObject'),
   );
   const disposeRemoteObjectExpression = t.memberExpression(
     clientIdentifier,
@@ -119,36 +111,6 @@ export default function createProxyGenerator(
         t.objectExpression([t.objectProperty(t.identifier('value'), value)]),
       ],
     );
-
-  const dependenciesNodes = names => {
-    return {
-      // let name0, ... nameN;
-      declaration: t.variableDeclaration(
-        'let',
-        names.map(name => t.variableDeclarator(t.identifier(name))),
-      ),
-      // function() { name0 = arguments[0]; ... nameN = arguments[N]; }
-      injectionCall: t.functionExpression(
-        null,
-        [],
-        t.blockStatement(
-          names.map((name, i) =>
-            t.expressionStatement(
-              t.assignmentExpression(
-                '=',
-                t.identifier(name),
-                t.memberExpression(
-                  t.identifier('arguments'),
-                  t.numericLiteral(i),
-                  /* computed: */ true,
-                ),
-              ),
-            ),
-          ),
-        ),
-      ),
-    };
-  };
 
   /**
    * Given the parsed result of a definition file, generate a remote proxy module
@@ -213,12 +175,6 @@ export default function createProxyGenerator(
     // Return the remote module.
     statements.push(t.returnStatement(remoteModule));
 
-    // Node module dependencies are added via the `inject` function, instead of
-    // requiring them. This eliminates having to worry about module resolution.
-    // In turn, that makes colocating the definition and the constructed proxy
-    // easier for internal and external services.
-    const deps = dependenciesNodes(['Observable']);
-
     // Wrap the remoteModule construction in a function that takes a RpcConnection
     // object as an argument.
     const func = t.arrowFunctionExpression(
@@ -233,11 +189,7 @@ export default function createProxyGenerator(
     const program = t.program([
       // !!!This module is not transpiled!!!
       t.expressionStatement(t.stringLiteral('use strict')),
-      deps.declaration,
       t.expressionStatement(assignment),
-      t.expressionStatement(
-        objectDefinePropertyCall('inject', deps.injectionCall),
-      ),
       t.expressionStatement(
         objectDefinePropertyCall('defs', objectToLiteral(defs)),
       ),
@@ -258,20 +210,10 @@ export default function createProxyGenerator(
     const callExpression = t.callExpression(callRemoteFunctionExpression, [
       t.stringLiteral(name),
       t.stringLiteral(funcType.returnType.kind),
-      t.identifier('args'),
+      marshalArgsCall(funcType.argumentTypes),
     ]);
 
-    // Promise.all(...).then(args => { return ...)
-    const argumentsPromise = marshalArgsCall(funcType.argumentTypes);
-
-    const result = generateUnmarshalResult(
-      funcType.returnType,
-      argumentsPromise,
-      t.arrowFunctionExpression(
-        [t.identifier('args')],
-        t.blockStatement([t.returnStatement(callExpression)]),
-      ),
-    );
+    const result = generateUnmarshalResult(funcType.returnType, callExpression);
 
     // function(arg0, ... argN) { return ... }
     const args = funcType.argumentTypes.map((arg, i) =>
@@ -311,12 +253,8 @@ export default function createProxyGenerator(
       );
     });
 
-    // Generate constructor proxy.
-    if (def.constructorArgs != null) {
-      methodDefinitions.push(
-        generateRemoteConstructor(def.name, def.constructorArgs),
-      );
-    }
+    // Generate a constructor stub.
+    methodDefinitions.push(generateRemoteConstructor());
 
     // Generate proxies for instance methods.
     const thisType: NamedType = {
@@ -345,36 +283,24 @@ export default function createProxyGenerator(
   }
 
   /**
-   * Helper function that generates a remote constructor proxy.
-   * @param className - The name of the interface.
-   * @param constructorArgs - The types of the arguments to the constructor.
+   * Helper function that generates a remote constructor stub.
+   * Remote constructors are not supported, so this just throws.
    * @returns A MethodDefinition node that can be added to a ClassBody.
    */
-  function generateRemoteConstructor(
-    className: string,
-    constructorArgs: Array<Parameter>,
-  ) {
-    // arg0, .... argN
-    const args = constructorArgs.map((arg, i) => t.identifier(`arg${i}`));
-    // [arg0, ... argN]
-    const argsArray = t.arrayExpression(args);
-    // [argType0, ... argTypeN]
-    const argTypes = t.arrayExpression(constructorArgs.map(objectToLiteral));
+  function generateRemoteConstructor() {
+    // throw Error(...)
+    const throwStatement = t.throwStatement(
+      t.callExpression(t.identifier('Error'), [
+        t.stringLiteral('constructors are not supported for remote objects'),
+      ]),
+    );
 
-    // client.createRemoteObject(className, this, [arg0, arg1, .... argN], [argType0 ... argTypeN])
-    const rpcCallExpression = t.callExpression(createRemoteObjectExpression, [
-      t.stringLiteral(className),
-      t.thisExpression(),
-      argsArray,
-      argTypes,
-    ]);
-
-    // constructor(arg0, arg1, ..., argN) { ... }
+    // constructor() { ... }
     return t.classMethod(
       'constructor',
       t.identifier('constructor'),
-      args,
-      t.blockStatement([t.expressionStatement(rpcCallExpression)]),
+      [],
+      t.blockStatement([throwStatement]),
     );
   }
 
@@ -389,34 +315,18 @@ export default function createProxyGenerator(
     thisType: NamedType,
     funcType: FunctionType,
   ) {
-    // _client.callRemoteMethod(this, methodName, returnType, args)
-    const remoteMethodCall = t.callExpression(callRemoteMethodExpression, [
-      idIdentifier,
+    // _client.callRemoteMethod(id, methodName, returnType, args)
+    const callRemoteMethod = t.callExpression(callRemoteMethodExpression, [
+      generateTransformStatement(t.thisExpression(), thisType, true),
       t.stringLiteral(methodName),
       t.stringLiteral(funcType.returnType.kind),
-      t.identifier('args'),
+      marshalArgsCall(funcType.argumentTypes),
     ]);
 
-    // Promise.all([argumentsPromise, idPromise])
-    const argumentsPromise = marshalArgsCall(funcType.argumentTypes);
-    const promiseAll = t.callExpression(
-      t.memberExpression(t.identifier('Promise'), t.identifier('all')),
-      [
-        t.arrayExpression([
-          argumentsPromise,
-          generateTransformStatement(t.thisExpression(), thisType, true),
-        ]),
-      ],
-    );
-
-    // ... .then(([args, id]) => callRemoteMethod)
+    // ... .then(value => _client.unmarshal(...))
     const result = generateUnmarshalResult(
       funcType.returnType,
-      promiseAll,
-      t.arrowFunctionExpression(
-        [t.arrayPattern([t.identifier('args'), idIdentifier])],
-        remoteMethodCall,
-      ),
+      callRemoteMethod,
     );
 
     // methodName(arg0, ... argN) { return ... }
@@ -431,40 +341,19 @@ export default function createProxyGenerator(
     );
   }
 
-  function generateUnmarshalResult(
-    returnType: Type,
-    argsExpression,
-    callExpression,
-  ) {
+  function generateUnmarshalResult(returnType: Type, valueExpression) {
     switch (returnType.kind) {
       case 'void':
-        return thenPromise(argsExpression, callExpression);
+        return valueExpression;
       case 'promise':
         const promiseTransformer = generateValueTransformer(returnType.type);
-        return thenPromise(
-          thenPromise(argsExpression, callExpression),
-          promiseTransformer,
-        );
+        return thenPromise(valueExpression, promiseTransformer);
       case 'observable':
-        // Observable.fromPromise(argsExpression)
-        const argsObservable = t.callExpression(
-          t.memberExpression(observableIdentifier, t.identifier('fromPromise')),
-          [argsExpression],
-        );
-        // ... .switchMap(callExpression)
-        const callObservable = t.callExpression(
-          t.memberExpression(argsObservable, t.identifier('switchMap')),
-          [callExpression],
-        );
-
-        // Map the events through the appropriate marshaller. We use concatMap instead of
-        // flatMap to ensure that the order doesn't change, in case one event takes especially long
-        // to marshal.
-        //
-        // ... .concatMap(value => _client.unmarshal(value, returnType))
+        // Map the events through the appropriate marshaller.
+        // ... .map(value => _client.unmarshal(value, returnType))
         const observableTransformer = generateValueTransformer(returnType.type);
         const unmarshalledObservable = t.callExpression(
-          t.memberExpression(callObservable, t.identifier('concatMap')),
+          t.memberExpression(valueExpression, t.identifier('map')),
           [observableTransformer],
         );
 
@@ -528,7 +417,7 @@ export default function createProxyGenerator(
     const convertArgs = [id, objectToLiteral(type)];
 
     // If the type is parameterized, we send the parameters as an optional fourth argument.
-    // flowlint-next-line sketchy-null-mixed:off
+    // $FlowFixMe(>=0.68.0) Flow suppress (T27187857)
     if (type.param) {
       convertArgs.push(objectToLiteral(type.param));
     }

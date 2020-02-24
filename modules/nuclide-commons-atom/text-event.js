@@ -6,7 +6,7 @@
  * LICENSE file in the root directory of this source tree. An additional grant
  * of patent rights can be found in the PATENTS file in the same directory.
  *
- * @flow
+ * @flow strict-local
  * @format
  */
 
@@ -14,7 +14,6 @@ import invariant from 'assert';
 import {Observable} from 'rxjs';
 import debounce from 'nuclide-commons/debounce';
 import {observableFromSubscribeFunction} from 'nuclide-commons/event';
-import {observeTextEditors} from './text-editor';
 import UniversalDisposable from 'nuclide-commons/UniversalDisposable';
 
 type EventCallback = (editor: TextEditor) => mixed;
@@ -261,20 +260,17 @@ export class TextEventDispatcher {
     );
 
     this._getEditorListenerDisposable().add(
-      observeTextEditors(editor => {
+      atom.workspace.observeTextEditors(editor => {
         const buffer = editor.getBuffer();
         const makeDispatch = (event: Event) => {
           return () => {
             this._dispatchEvents(editor, event);
           };
         };
-        this._getEditorListenerDisposable().add(
+        this._getEditorListenerDisposable().addUntilDestroyed(
+          editor,
           buffer.onDidStopChanging(makeDispatch('did-change')),
-        );
-        this._getEditorListenerDisposable().add(
           buffer.onDidSave(makeDispatch('did-save')),
-        );
-        this._getEditorListenerDisposable().add(
           buffer.onDidReload(makeDispatch('did-reload')),
         );
         // During reload, many text editors are opened simultaneously.

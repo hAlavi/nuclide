@@ -5,16 +5,18 @@
  * This source code is licensed under the license found in the LICENSE file in
  * the root directory of this source tree.
  *
- * @flow
+ * @flow strict-local
  * @format
  */
 
-import type {IRemoteSocket, TunnelHost} from './types';
+import type {TunnelHost} from 'nuclide-adb/lib/types';
+import type {IRemoteSocket} from './types';
+
 import UniversalDisposable from 'nuclide-commons/UniversalDisposable';
 import {getLogger} from 'log4js';
 import net from 'net';
 import {protocolLogger} from '../../nuclide-server/lib/utils';
-import {track} from '../../nuclide-analytics';
+import {track} from 'nuclide-analytics';
 
 const PROTOCOL_LOGGER_COUNT = 20;
 
@@ -65,7 +67,7 @@ export class Connection {
         track('socket-service:attempting-to-write-data-after-close', {
           disposeCalled: this._disposeCalled,
           lastError: this._error,
-          protocolLog: protocolLogger.tail(PROTOCOL_LOGGER_COUNT),
+          protocolLog: protocolLogger.dump(PROTOCOL_LOGGER_COUNT),
         });
       }
     });

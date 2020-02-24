@@ -9,13 +9,17 @@
  * @format
  */
 
-import type {Expected} from '../../../commons-node/expected';
-import type {Process, ProcessTask, AppInfoRow} from '../types';
+import type {Expected} from 'nuclide-commons/expected';
+import type {
+  Process,
+  Task,
+  ProcessTask,
+  AppInfoRow,
+} from 'nuclide-debugger-common/types';
 import type {Props as TaskButtonPropsType} from './TaskButton';
 import type {TaskEvent} from 'nuclide-commons/process';
 
 import {bindObservableAsProps} from 'nuclide-commons-ui/bindObservableAsProps';
-import {DeviceTask} from '../DeviceTask';
 import {Icon} from 'nuclide-commons-ui/Icon';
 import * as React from 'react';
 import {AppInfoTable} from './AppInfoTable';
@@ -31,7 +35,7 @@ type Props = {|
   appInfoTables: Expected<Map<string, Array<AppInfoRow>>>,
   processes: Expected<Process[]>,
   processTasks: ProcessTask[],
-  deviceTasks: DeviceTask[],
+  deviceTasks: Array<Task>,
   isDeviceConnected: boolean,
 |};
 
@@ -96,10 +100,7 @@ export class DevicePanel extends React.Component<Props> {
     );
   }
 
-  _taskEventsToProps(
-    task: DeviceTask,
-    taskEvent: ?TaskEvent,
-  ): TaskButtonPropsType {
+  _taskEventsToProps(task: Task, taskEvent: ?TaskEvent): TaskButtonPropsType {
     return {
       name: task.getName(),
       start: () => task.start(),

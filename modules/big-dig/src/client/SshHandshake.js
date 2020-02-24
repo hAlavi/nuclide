@@ -10,12 +10,15 @@
  * @format
  */
 
+import type {BigDigCliParams} from '../server/cli';
 import type {
   ClientErrorExtensions,
   ConnectConfig,
   Prompt as SshClientPromptType,
 } from './SshClient';
+import type {DnsFamily} from './lookup-prefer-ip-v6';
 
+import {getLogger} from 'log4js';
 import net from 'net';
 import invariant from 'assert';
 import {Client as SshConnection} from 'ssh2';
@@ -28,6 +31,7 @@ import lookupPreferIpv6 from './lookup-prefer-ip-v6';
 import {onceEventOrError} from '../common/events';
 import {getPackage} from './RemotePackage';
 import type {PackageParams, RemotePackage} from './RemotePackage';
+import asyncRequest from './utils/asyncRequest';
 
 export type {
   ExtractionMethod,
@@ -40,7 +44,8 @@ export type {
 export type RemoteConnectionConfiguration = {
   host: string, // host nuclide server is running on.
   port: number, // port to connect to.
-  certificateAuthorityCertificate?: Buffer, // certificate of certificate authority.
+  family: DnsFamily, // IPv4/IPv6
+  certificateAuthorityCertificate?: Buffer | Array<string>, // certificate of ca.
   clientCertificate?: Buffer, // client certificate for https connection.
   clientKey?: Buffer, // key for https connection.
 };
@@ -52,23 +57,35 @@ const SFTP_TIMEOUT_MS = 20 * 1000;
 // Automatically retry with a password prompt if existing authentication methods fail.
 const PASSWORD_RETRIES = 3;
 
+const logger = getLogger('SshHandshake');
+
 export type SshConnectionConfiguration = {
   host: string, // host nuclide server is running on
   sshPort: number, // ssh port of host nuclide server is running on
   username: string, // username to authenticate as
   pathToPrivateKey: string, // The path to private key
   remoteServer: PackageParams, // Command to use to start server
-  remoteServerPort?: number, // Port remote server should run on (defaults to 0)
+  remoteServerPorts: string, // Range of ports remote server should run on
   remoteServerCustomParams?: Object, // JSON-serializable params.
   authMethod: SupportedMethodTypes, // Which of the authentication methods in `SupportedMethods` to use.
   password: string, // for simple password-based authentication
+  exclusive?: string, // Ensure that only one server with this "exclusive" tag is running.
+  useRootCanalCerts?: boolean, // whether or not to use rootcanal certs
+  certificateAuthorityCertificate?: ?Buffer | Array<string>, // the ca cert
+  clientCertificate?: ?Buffer, // the client certificate
+  clientKey?: ?Buffer, // the client key
 };
 
-export type SupportedMethodTypes = 'SSL_AGENT' | 'PASSWORD' | 'PRIVATE_KEY';
-const SupportedMethods = Object.freeze({
+export type SupportedMethodTypes =
+  | 'SSL_AGENT'
+  | 'PASSWORD'
+  | 'PRIVATE_KEY'
+  | 'ROOTCANAL';
+export const SupportedMethods = Object.freeze({
   SSL_AGENT: 'SSL_AGENT',
   PASSWORD: 'PASSWORD',
   PRIVATE_KEY: 'PRIVATE_KEY',
+  ROOTCANAL: 'ROOTCANAL',
 });
 
 const ErrorType = Object.freeze({
@@ -82,7 +99,7 @@ const ErrorType = Object.freeze({
   SERVER_START_FAILED: 'SERVER_START_FAILED',
   SFTP_TIMEOUT: 'SFTP_TIMEOUT',
   UNSUPPORTED_AUTH_METHOD: 'UNSUPPORTED_AUTH_METHOD',
-  USER_CANCELLED: 'USER_CANCELLED',
+  USER_CANCELED: 'USER_CANCELLED',
   SERVER_SETUP_FAILED: 'SERVER_SETUP_FAILED',
 });
 
@@ -241,7 +258,7 @@ export class SshHandshakeError extends Error {
     this.message = message;
     this.errorType = errorType;
     this.innerError = innerError;
-    this.isCancellation = errorType === SshHandshake.ErrorType.USER_CANCELLED;
+    this.isCancellation = errorType === SshHandshake.ErrorType.USER_CANCELED;
   }
 }
 
@@ -278,14 +295,17 @@ export class SshHandshake {
   _config: SshConnectionConfiguration;
   _forwardingServer: net.Server;
   _remoteHost: ?string;
+  _remoteFamily: ?DnsFamily;
   _remotePort: number;
-  _certificateAuthorityCertificate: Buffer;
+  _certificateAuthorityCertificate: Array<string> | Buffer;
   _clientCertificate: Buffer;
   _clientKey: Buffer;
-  _cancelled: boolean;
+  _canceled: boolean;
+  _tunnelIfNotSecure: boolean;
 
   constructor(delegate: SshConnectionDelegate, connection?: SshConnection) {
-    this._cancelled = false;
+    this._tunnelIfNotSecure = false;
+    this._canceled = false;
     this._delegate = delegate;
     this._connection = new SshClient(
       connection ? connection : new SshConnection(),
@@ -354,11 +374,16 @@ export class SshHandshake {
       try {
         privateKey = await fs.readFileAsBuffer(expandedPath);
       } catch (error) {
-        throw new SshHandshakeError(
-          `Failed to read private key at ${expandedPath}.`,
-          SshHandshake.ErrorType.CANT_READ_PRIVATE_KEY,
-          error,
+        logger.warn(
+          `Failed to read private key at ${expandedPath}, falling back to password auth`,
         );
+        return {
+          host: address,
+          port: config.sshPort,
+          username: config.username,
+          tryKeyboard: true,
+          readyTimeout: READY_TIMEOUT_MS,
+        };
       }
 
       return {
@@ -387,6 +412,12 @@ export class SshHandshake {
    * @returns the authentication error, or `null` if successful.
    */
   async _connectOrNeedsAuth(config: ConnectConfig): Promise<?SshAuthError> {
+    if (this._canceled) {
+      throw new SshHandshakeError(
+        'Connection has been cancelled by the user',
+        SshHandshake.ErrorType.USER_CANCELED,
+      );
+    }
     try {
       await this._connection.connect(config);
       return null;
@@ -398,6 +429,11 @@ export class SshHandshake {
         return new SshAuthError(error, {needsPrivateKeyPassword: true});
       } else if (error.level === 'client-authentication') {
         return new SshAuthError(error, {needsPrivateKeyPassword: false});
+      } else if (error.level !== undefined) {
+        const errorType =
+          (error.level && SshConnectionErrorLevelMap.get(error.level)) ||
+          SshHandshake.ErrorType.UNKNOWN;
+        throw new SshHandshakeError(error.message, errorType, error);
       } else {
         throw error;
       }
@@ -447,6 +483,7 @@ export class SshHandshake {
     // Keep asking the user for the correct password until they run out of attempts or the
     // connection fails for a reason other than the password being wrong.
     while (authError != null && attempts < PASSWORD_RETRIES) {
+      const retry = attempts > 0;
       const retryText = attempts > 0 ? ' again' : '';
       const prompt = `Authentication failed. Try entering your password${retryText}: `;
       ++attempts;
@@ -456,7 +493,7 @@ export class SshHandshake {
         kind: 'private-key',
         prompt,
         echo: false,
-        retry: true,
+        retry,
       });
       // eslint-disable-next-line no-await-in-loop
       authError = await this._connectOrNeedsAuth({
@@ -483,10 +520,10 @@ export class SshHandshake {
    * not an `SshHandshakeError`, then wrap it with `UNKNOWN`.
    */
   _wrapError(error: any): SshHandshakeError {
-    if (this._cancelled) {
+    if (this._canceled) {
       return new SshHandshakeError(
         'Cancelled by user',
-        SshHandshake.ErrorType.USER_CANCELLED,
+        SshHandshake.ErrorType.USER_CANCELED,
         error,
       );
     } else if (error instanceof SshHandshakeError) {
@@ -510,12 +547,12 @@ export class SshHandshake {
   ): Promise<[RemoteConnectionConfiguration, SshConnectionConfiguration]> {
     try {
       this._config = config;
-      this._cancelled = false;
+      this._canceled = false;
       this._willConnect();
 
-      let address;
+      let lookup;
       try {
-        address = await lookupPreferIpv6(config.host);
+        lookup = await lookupPreferIpv6(config.host);
       } catch (error) {
         throw new SshHandshakeError(
           'Failed to resolve DNS.',
@@ -523,8 +560,38 @@ export class SshHandshake {
           error,
         );
       }
+      const {address, family} = lookup;
+      this._remoteFamily = family;
+
+      if (config.useRootCanalCerts) {
+        logger.info('using Nuclide bootstrap service to launch server');
+        invariant(config.clientCertificate != null);
+        invariant(config.clientKey != null);
+        invariant(config.certificateAuthorityCertificate != null);
+        const BOOT_PORT = 9094;
+        const cert = config.clientCertificate;
+        const key = config.clientKey;
+        const ca = config.certificateAuthorityCertificate;
+        const serverStartConfig = this._getServerStartConfig(config);
+        const uri = `https://${serverStartConfig.params.cname}:${BOOT_PORT}`;
+        const response = await asyncRequest({
+          agentOptions: {cert, key, ca},
+          uri,
+          method: 'POST',
+          body: JSON.stringify(serverStartConfig),
+        });
+        const remoteConnectionConfig = JSON.parse(response.body);
+        remoteConnectionConfig.host = config.host;
+        remoteConnectionConfig.family = this._remoteFamily;
+        remoteConnectionConfig.certificateAuthorityCertificate = ca;
+        remoteConnectionConfig.clientCertificate = cert;
+        remoteConnectionConfig.clientKey = key;
+        this._didConnect(remoteConnectionConfig);
+        return Promise.resolve([remoteConnectionConfig, config]);
+      }
 
       const connectConfig = await this._getConnectConfig(address, config);
+
       const authError = await this._connectOrNeedsAuth(connectConfig);
       if (authError) {
         await this._connectFallbackViaPassword(
@@ -535,22 +602,28 @@ export class SshHandshake {
       }
 
       return [await this._onSshConnectionIsReady(), this._config];
-    } catch (innerError) {
-      const error = this._wrapError(innerError);
+    } catch (error) {
+      const wrappedError = this._wrapError(error);
 
       // eslint-disable-next-line no-console
       console.error(
-        `SshHandshake failed: ${error.errorType}, ${error.message}`,
-        error.innerError,
+        `SshHandshake failed: ${wrappedError.errorType}, ${
+          wrappedError.message
+        }`,
+        wrappedError.innerError,
       );
-      this._delegate.onError(error.errorType, innerError, this._config);
+      this._delegate.onError(
+        wrappedError.errorType,
+        wrappedError.innerError || error,
+        this._config,
+      );
 
       throw error;
     }
   }
 
   async cancel(): Promise<void> {
-    this._cancelled = true;
+    this._canceled = true;
     await this._connection.end();
   }
 
@@ -609,13 +682,19 @@ export class SshHandshake {
     // Do not throw when any of them (`ca`, `cert`, or `key`) are undefined because that will be the
     // case when the server is started in "insecure" mode. See `::_isSecure`, which returns the
     // security of this connection after the server is started.
-    if (typeof serverInfo.ca === 'string') {
+    if (
+      this._certificateAuthorityCertificate == null &&
+      typeof serverInfo.ca === 'string'
+    ) {
       this._certificateAuthorityCertificate = new Buffer(serverInfo.ca);
     }
-    if (typeof serverInfo.cert === 'string') {
+    if (
+      this._clientCertificate == null &&
+      typeof serverInfo.cert === 'string'
+    ) {
       this._clientCertificate = new Buffer(serverInfo.cert);
     }
-    if (typeof serverInfo.key === 'string') {
+    if (this._clientKey == null && typeof serverInfo.key === 'string') {
       this._clientKey = new Buffer(serverInfo.key);
     }
   }
@@ -693,6 +772,9 @@ export class SshHandshake {
       // Update server info that is needed for setting up client.
       this._updateServerInfo(serverInfo);
     } catch (error) {
+      if (error instanceof SshHandshakeError) {
+        throw error;
+      }
       throw new SshHandshakeError(
         'Unknown error while acquiring server start information',
         SshHandshake.ErrorType.UNKNOWN,
@@ -777,19 +859,32 @@ export class SshHandshake {
     return server;
   }
 
+  _getServerStartConfig(config: SshConnectionConfiguration): Object {
+    const remoteTempFile = `/tmp/big-dig-sshhandshake-${Math.random()}`;
+    const params: BigDigCliParams = {
+      cname: config.host,
+      jsonOutputFile: remoteTempFile,
+      timeout: 60000,
+      expiration: '14d',
+      serverParams: config.remoteServerCustomParams,
+      exclusive: config.exclusive,
+      ports: config.remoteServerPorts,
+      useRootCanalCerts: config.useRootCanalCerts,
+    };
+
+    return {
+      command: config.remoteServer.commandNoArgs,
+      flags: config.remoteServer.flags,
+      params,
+    };
+  }
+
   /**
    * Invokes the remote server and updates the server info via `_updateServerInfo`.
    */
   async _startRemoteServer(server: RemotePackage): Promise<void> {
-    const remoteTempFile = `/tmp/big-dig-sshhandshake-${Math.random()}`;
-    const params = {
-      cname: this._config.host,
-      jsonOutputFile: remoteTempFile,
-      timeout: '60s', // Currently unused and not configurable.
-      expiration: '7d',
-      serverParams: this._config.remoteServerCustomParams,
-      port: this._config.remoteServerPort,
-    };
+    const params = this._getServerStartConfig(this._config).params;
+    const remoteTempFile = params.jsonOutputFile;
 
     try {
       // Run the server bootstrapper: this will create a server process, output the process info
@@ -803,7 +898,7 @@ export class SshHandshake {
       if (code !== 0) {
         throw new SshHandshakeError(
           'Remote shell execution failed',
-          SshHandshake.ErrorType.UNKNOWN,
+          SshHandshake.ErrorType.SERVER_START_FAILED,
           new Error(stdout),
         );
       }
@@ -828,11 +923,12 @@ export class SshHandshake {
     await this._startRemoteServer(server);
 
     // Use an ssh tunnel if server is not secure
-    if (this._isSecure()) {
-      // flowlint-next-line sketchy-null-string:off
-      invariant(this._remoteHost);
+    if (!this._tunnelIfNotSecure || this._isSecure()) {
+      invariant(this._remoteHost != null);
+      invariant(this._remoteFamily != null);
       return this._didConnect({
         host: this._remoteHost,
+        family: this._remoteFamily,
         port: this._remotePort,
         certificateAuthorityCertificate: this._certificateAuthorityCertificate,
         clientCertificate: this._clientCertificate,
@@ -846,10 +942,11 @@ export class SshHandshake {
       this._forwardingServer.listen(0, 'localhost');
       await listening;
       const localPort = this._getLocalPort();
-      // flowlint-next-line sketchy-null-number:off
-      invariant(localPort);
+      invariant(localPort != null);
+      invariant(this._remoteFamily != null);
       return this._didConnect({
         host: 'localhost',
+        family: this._remoteFamily,
         port: localPort,
       });
     }

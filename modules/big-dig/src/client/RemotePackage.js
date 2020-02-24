@@ -6,7 +6,7 @@
  * LICENSE file in the root directory of this source tree. An additional grant
  * of patent rights can be found in the PATENTS file in the same directory.
  *
- * @flow
+ * @flow strict-local
  * @format
  */
 
@@ -84,11 +84,17 @@ export type ManagedPackageParams = {|
   command: (installationPath: string, args: string) => string,
   /** Location to store the package. */
   installationPath: string,
+  /** the command with no additional arguments */
+  commandNoArgs?: string,
+  /** the flags that go with cmd */
+  flags?: Array<string>,
 |};
 
 /** Assume the package is already installed and not managed by Big-dig. */
 export type UnmanagedPackageParams = {|
   command: string,
+  commandNoArgs?: string,
+  flags?: Array<string>,
   cwd?: string,
 |};
 
@@ -233,6 +239,7 @@ async function runPackage(
   const {stdout, result} = await ssh.exec(cmd, options);
   // Collect any stdout in case there is an error.
   let output = '';
+  // eslint-disable-next-line nuclide-internal/unused-subscription
   stdout.subscribe(data => (output += data));
   // Wait for the bootstrapper to finish
   const {code} = await result;
@@ -310,7 +317,7 @@ class ManagedPackage implements RemotePackage {
     getLogger().info('Verifying installation...');
 
     try {
-      if (!await sftp.exists(pkg.installationPath)) {
+      if (!(await sftp.exists(pkg.installationPath))) {
         return needsInstall('Installation path does not exist');
       }
       const installPathStats = await sftp.lstat(pkg.installationPath);
@@ -321,7 +328,7 @@ class ManagedPackage implements RemotePackage {
         );
       } else if ((await sftp.readdir(pkg.installationPath)).length === 0) {
         return needsInstall('Installation path is empty');
-      } else if (!await sftp.exists(manifestFile)) {
+      } else if (!(await sftp.exists(manifestFile))) {
         return corrupt(
           `Manifest does not exist at ${manifestFile}`,
           'missing-manifest',
@@ -516,6 +523,7 @@ class ManagedPackage implements RemotePackage {
     const extractCmd = extract.fromStdinCommand(pkg.installationPath);
     const {stdout, stdio, result} = await ssh.exec(extractCmd);
     let output = '';
+    // eslint-disable-next-line nuclide-internal/unused-subscription
     stdout.subscribe(data => (output += data));
     const [, {code}] = await Promise.all([
       this._transferViaStream(archive, stdio),
@@ -545,6 +553,7 @@ class ManagedPackage implements RemotePackage {
     );
     const {stdout, result} = await ssh.exec(extractCmd);
     let output = '';
+    // eslint-disable-next-line nuclide-internal/unused-subscription
     stdout.subscribe(data => (output += data));
     const {code} = await result;
     if (code !== 0) {

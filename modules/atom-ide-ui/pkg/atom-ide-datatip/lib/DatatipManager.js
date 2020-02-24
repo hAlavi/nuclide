@@ -26,7 +26,7 @@ import {asyncFind} from 'nuclide-commons/promise';
 import * as React from 'react';
 import ReactDOM from 'react-dom';
 import UniversalDisposable from 'nuclide-commons/UniversalDisposable';
-import analytics from 'nuclide-commons-atom/analytics';
+import analytics from 'nuclide-commons/analytics';
 import debounce from 'nuclide-commons/debounce';
 import featureConfig from 'nuclide-commons-atom/feature-config';
 import idx from 'idx';
@@ -34,7 +34,6 @@ import performanceNow from 'nuclide-commons/performanceNow';
 import {Observable} from 'rxjs';
 import {getLogger} from 'log4js';
 import ProviderRegistry from 'nuclide-commons-atom/ProviderRegistry';
-import {observeTextEditors} from 'nuclide-commons-atom/text-editor';
 import {
   getModifierKeysFromMouseEvent,
   getModifierKeyFromKeyboardEvent,
@@ -46,6 +45,7 @@ import {PinnedDatatip} from './PinnedDatatip';
 
 const DEFAULT_DATATIP_DEBOUNCE_DELAY = 1000;
 const DEFAULT_DATATIP_INTERACTED_DEBOUNCE_DELAY = 1000;
+const TRACK_SAMPLE_RATE = 10;
 
 type PinClickHandler = (editor: atom$TextEditor, datatip: Datatip) => void;
 
@@ -112,22 +112,20 @@ async function getDatatipResults<TProvider: AnyDatatipProvider>(
   const promises = filteredDatatipProviders.map(
     async (provider: TProvider): Promise<?DatatipResult> => {
       const name = getProviderName(provider);
-      const timingTracker = new analytics.TimingTracker(name + '.datatip');
       try {
-        const datatip: ?Datatip = await invoke(provider);
-        if (!datatip) {
-          return null;
-        }
-
-        timingTracker.onSuccess();
-
-        const result: DatatipResult = {
-          datatip,
-          provider,
-        };
-        return result;
+        return await analytics.trackTimingSampled(
+          name + '.datatip',
+          async (): Promise<?DatatipResult> => {
+            const datatip: ?Datatip = await invoke(provider);
+            if (!datatip) {
+              return null;
+            }
+            return {datatip, provider};
+          },
+          TRACK_SAMPLE_RATE,
+          {path: editor.getPath()},
+        );
       } catch (e) {
-        timingTracker.onError(e);
         getLogger('datatip').error(
           `Error getting datatip from provider ${name}`,
           e,
@@ -195,11 +193,6 @@ function mountDatatipWithMarker(
   const overlayMarker = editor.markBufferRange(new Range(position, position), {
     invalidate: 'never',
   });
-  editor.decorateMarker(overlayMarker, {
-    type: 'overlay',
-    position: 'tail',
-    item: element,
-  });
 
   return new UniversalDisposable(
     () => highlightMarker.destroy(),
@@ -209,6 +202,12 @@ function mountDatatipWithMarker(
     // often need to measure their size in the DOM.
     Observable.from(editor.getElement().getNextUpdatePromise()).subscribe(
       () => {
+        editor.decorateMarker(overlayMarker, {
+          type: 'overlay',
+          class: 'datatip-overlay',
+          position: 'tail',
+          item: element,
+        });
         element.style.display = 'block';
         ReactDOM.render(renderedProviders, element);
       },
@@ -268,7 +267,7 @@ class DatatipManagerForEditor {
     this._datatipProviders = datatipProviders;
     this._modifierDatatipProviders = modifierDatatipProviders;
     this._datatipElement = document.createElement('div');
-    this._datatipElement.className = 'datatip-overlay';
+    this._datatipElement.className = 'datatip-element';
     this._datatipState = DatatipState.HIDDEN;
     this._heldKeys = new Set();
     this._interactedWith = false;
@@ -774,29 +773,26 @@ class DatatipManagerForEditor {
 export class DatatipManager {
   _datatipProviders: ProviderRegistry<DatatipProvider>;
   _modifierDatatipProviders: ProviderRegistry<ModifierDatatipProvider>;
-  _editorManagers: Map<atom$TextEditor, DatatipManagerForEditor>;
+  _editorManagers: WeakMap<atom$TextEditor, DatatipManagerForEditor>;
   _subscriptions: UniversalDisposable;
 
   constructor() {
     this._subscriptions = new UniversalDisposable();
-    this._editorManagers = new Map();
+    this._editorManagers = new WeakMap();
     this._datatipProviders = new ProviderRegistry();
     this._modifierDatatipProviders = new ProviderRegistry();
 
     this._subscriptions.add(
-      observeTextEditors(editor => {
+      atom.workspace.observeTextEditors(editor => {
         const manager = new DatatipManagerForEditor(
           editor,
           this._datatipProviders,
           this._modifierDatatipProviders,
         );
         this._editorManagers.set(editor, manager);
-        const disposable = new UniversalDisposable(() => {
-          manager.dispose();
+        this._subscriptions.addUntilDestroyed(editor, manager, () => {
           this._editorManagers.delete(editor);
         });
-        this._subscriptions.add(disposable);
-        editor.onDidDestroy(() => disposable.dispose());
       }),
     );
   }
@@ -826,9 +822,5 @@ export class DatatipManager {
 
   dispose(): void {
     this._subscriptions.dispose();
-    this._editorManagers.forEach(manager => {
-      manager.dispose();
-    });
-    this._editorManagers = new Map();
   }
 }

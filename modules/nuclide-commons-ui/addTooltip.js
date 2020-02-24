@@ -17,15 +17,15 @@ import shallowEqual from 'shallowequal';
 const REREGISTER_DELAY = 100;
 
 const _tooltipRequests: Map<Element, atom$TooltipsAddOptions> = new Map();
-const _createdTooltips: Map<
+const _createdTooltips: WeakMap<
   Element,
   {options: atom$TooltipsAddOptions, disposable: IDisposable},
-> = new Map();
+> = new WeakMap();
 const _toDispose: Set<Element> = new Set();
 let _timeoutHandle: ?TimeoutID;
 
 /**
- * Adds a self-disposing Atom's tooltip to a react element.
+ * Adds a self-disposing Atom tooltip to a react element.
  *
  * Typical usage:
  * <div ref={addTooltip({title: 'My awesome tooltip', delay: 100, placement: 'top'})} />
@@ -51,6 +51,7 @@ export default function addTooltip(
           _toDispose.add(node);
         }
       }
+      node = null;
 
       return;
     }

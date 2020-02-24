@@ -5,30 +5,41 @@
  * This source code is licensed under the license found in the LICENSE file in
  * the root directory of this source tree.
  *
- * @flow
+ * @flow strict-local
  * @format
  */
 
-import type {NuclideUri} from 'nuclide-commons/nuclideUri';
-import type {CodeSearchResult} from './types';
+import type {CodeSearchResult, CodeSearchParams} from './types';
 
 import {Observable} from 'rxjs';
-import {observeGrepLikeProcess} from './handlerCommon';
-import {parseGrepLine} from './parser';
+import {observeGrepLikeProcess, mergeOutputToResults} from './handlerCommon';
+import {parseProcessLine} from './parser';
 
-export function search(
-  directory: NuclideUri,
-  regex: RegExp,
-): Observable<CodeSearchResult> {
-  const args = (regex.ignoreCase ? ['-i'] : []).concat([
-    // recursive, always print filename, print line number, use regex
-    '-rHn',
-    '-E',
-    '-e',
-    regex.source,
-    directory,
-  ]);
-  return observeGrepLikeProcess('grep', args, directory).flatMap(event =>
-    parseGrepLine(event, directory, regex),
+export function search(params: CodeSearchParams): Observable<CodeSearchResult> {
+  const {regex, limit, leadingLines, trailingLines} = params;
+  const searchSources = params.recursive ? [params.directory] : params.files;
+  if (searchSources.length === 0) {
+    return Observable.empty();
+  }
+  const args = (regex.ignoreCase ? ['-i'] : [])
+    .concat(limit != null ? ['-m', String(limit)] : [])
+    .concat(leadingLines != null ? ['-B', String(leadingLines)] : [])
+    .concat(trailingLines != null ? ['-A', String(trailingLines)] : [])
+    .concat([
+      // recursive, always print filename, print line number with null byte,
+      // use extended regex
+      '-rHn',
+      '--null',
+      '-E',
+      '-e',
+      regex.source,
+    ])
+    .concat(searchSources);
+  return mergeOutputToResults(
+    observeGrepLikeProcess('grep', args),
+    event => parseProcessLine(event, 'grep'),
+    regex,
+    leadingLines || 0,
+    trailingLines || 0,
   );
 }

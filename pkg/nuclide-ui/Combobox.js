@@ -23,7 +23,7 @@ type DefaultProps = {
   maxOptionCount: number,
   onChange: (newValue: string) => mixed,
   onSelect: (newValue: string) => mixed,
-  width: ?number,
+  wrapperStyle: ?mixed,
   disabled: boolean,
 };
 
@@ -72,21 +72,19 @@ export class Combobox extends React.Component<Props, State> {
   _updateSubscription: ?rxjs$ISubscription;
   _selectedOption: ?HTMLElement;
   _subscriptions: UniversalDisposable;
-  _shouldBlur: boolean;
 
   static defaultProps: DefaultProps = {
     className: '',
     maxOptionCount: 10,
     onChange: (newValue: string) => {},
     onSelect: (newValue: string) => {},
-    width: 200,
     disabled: false,
+    wrapperStyle: {},
   };
 
   constructor(props: Props) {
     super(props);
     this._subscriptions = new UniversalDisposable();
-    this._shouldBlur = true;
     this.state = {
       error: null,
       filteredOptions: [],
@@ -146,6 +144,9 @@ export class Combobox extends React.Component<Props, State> {
   receiveUpdate = (newOptions: Array<string>) => {
     const filteredOptions = this._getFilteredOptions(
       newOptions,
+      // TODO: (wbinnssmith) T30771435 this setState depends on current state
+      // and should use an updater function rather than an object
+      // eslint-disable-next-line react/no-access-state-in-setstate
       this.state.textInput,
     );
     this.setState({
@@ -175,10 +176,14 @@ export class Combobox extends React.Component<Props, State> {
     return nullthrows(this._freeformInput).getText();
   }
 
-  focus(showOptions: boolean): void {
-    this._shouldBlur = true;
+  focus(): void {
     nullthrows(this._freeformInput).focus();
-    this.setState({optionsVisible: showOptions});
+  }
+
+  scrollToEnd(): void {
+    nullthrows(this._freeformInput)
+      .getTextEditor()
+      .moveToEndOfLine();
   }
 
   _getFilteredOptions(
@@ -216,7 +221,7 @@ export class Combobox extends React.Component<Props, State> {
 
   _getOptionsElement(): HTMLElement {
     if (this._optionsElement == null) {
-      const workspaceElement = atom.views.getView(atom.workspace);
+      const workspaceElement = document.body;
       invariant(workspaceElement != null);
 
       this._optionsElement = document.createElement('div');
@@ -250,6 +255,9 @@ export class Combobox extends React.Component<Props, State> {
     }
     this.requestUpdate(newText);
     const filteredOptions = this._getFilteredOptions(
+      // TODO: (wbinnssmith) T30771435 this setState depends on current state
+      // and should use an updater function rather than an object
+      // eslint-disable-next-line react/no-access-state-in-setstate
       this.state.options,
       newText,
     );
@@ -277,9 +285,6 @@ export class Combobox extends React.Component<Props, State> {
   };
 
   _handleInputBlur = (event: Object): void => {
-    if (!this._shouldBlur) {
-      return;
-    }
     this._handleCancel();
     const {onBlur} = this.props;
     if (onBlur != null) {
@@ -288,12 +293,10 @@ export class Combobox extends React.Component<Props, State> {
   };
 
   _handleInputClick = (): void => {
-    this._shouldBlur = true;
     this.setState({optionsVisible: true});
   };
 
   _handleItemClick(selectedValue: string, event: Object): void {
-    this._shouldBlur = false;
     this.selectValue(selectedValue, () => {
       // Focus the input again because the click will cause the input to blur. This mimics native
       // <select> behavior by keeping focus in the form being edited.
@@ -321,8 +324,12 @@ export class Combobox extends React.Component<Props, State> {
       {
         selectedIndex: Math.min(
           this.props.maxOptionCount - 1,
+          // TODO: (wbinnssmith) T30771435 this setState depends on current state
+          // and should use an updater function rather than an object
+          /* eslint-disable react/no-access-state-in-setstate */
           this.state.selectedIndex + 1,
           this.state.filteredOptions.length - 1,
+          /* eslint-enable react/no-access-state-in-setstate */
         ),
       },
       this._scrollSelectedOptionIntoViewIfNeeded,
@@ -332,6 +339,9 @@ export class Combobox extends React.Component<Props, State> {
   _handleMoveUp = () => {
     this.setState(
       {
+        // TODO: (wbinnssmith) T30771435 this setState depends on current state
+        // and should use an updater function rather than an object
+        // eslint-disable-next-line react/no-access-state-in-setstate
         selectedIndex: Math.max(0, this.state.selectedIndex - 1),
       },
       this._scrollSelectedOptionIntoViewIfNeeded,
@@ -413,8 +423,13 @@ export class Combobox extends React.Component<Props, State> {
             <li
               className={isSelected ? 'selected' : null}
               key={'option-' + option}
+              onMouseDown={e => {
+                // Prevent the input's blur event from firing.
+                e.preventDefault();
+              }}
               onClick={this._handleItemClick.bind(this, option)}
               onMouseOver={this._setSelectedIndex.bind(this, i)}
+              // eslint-disable-next-line nuclide-internal/jsx-simple-callback-refs
               ref={isSelected ? this._handleSelectedOption : null}>
               {beforeMatch}
               <strong className="text-highlight">{highlightedMatch}</strong>
@@ -446,16 +461,14 @@ export class Combobox extends React.Component<Props, State> {
       );
     }
 
-    const {initialTextInput, placeholderText, size, width} = this.props;
-    const wrapperStyle = {
-      width: width == null ? undefined : `${width}px`,
-    };
+    const {initialTextInput, placeholderText, size, wrapperStyle} = this.props;
     return (
       <div
         className={
           'select-list popover-list popover-list-subtle ' + this.props.className
         }
-        style={wrapperStyle}>
+        style={wrapperStyle}
+        title={this._freeformInput != null ? this.getText() : ''}>
         <AtomInput
           initialValue={initialTextInput}
           onBlur={this._handleInputBlur}
@@ -469,7 +482,6 @@ export class Combobox extends React.Component<Props, State> {
             this._freeformInput = input;
           }}
           size={size}
-          width={width}
           disabled={this.props.disabled}
         />
         {optionsContainer}

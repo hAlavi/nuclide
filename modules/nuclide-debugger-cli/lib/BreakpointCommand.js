@@ -6,7 +6,7 @@
  * LICENSE file in the root directory of this source tree. An additional grant
  * of patent rights can be found in the PATENTS file in the same directory.
  *
- * @flow
+ * @flow strict-local
  * @format
  */
 
@@ -14,12 +14,17 @@ import type {Command} from './Command';
 import type {DebuggerInterface, BreakpointSetResult} from './DebuggerInterface';
 import type {ConsoleIO} from './ConsoleIO';
 
-import BreakpointDeleteCommand from './BreakpointDeleteCommand';
+import invariant from 'assert';
+import nullthrows from 'nullthrows';
+import BreakpointClearCommand from './BreakpointClearCommand';
+import BreakpointCommandParser from './BreakpointCommandParser';
 import BreakpointDisableCommand from './BreakpointDisableCommand';
 import BreakpointEnableCommand from './BreakpointEnableCommand';
 import BreakpointListCommand from './BreakpointListCommand';
+import BreakpointToggleCommand from './BreakpointToggleCommand';
 import CommandDispatcher from './CommandDispatcher';
 import HelpCommand from './HelpCommand';
+import TokenizedLine from './TokenizedLine';
 
 export default class BreakpointCommand implements Command {
   name = 'breakpoint';
@@ -29,7 +34,7 @@ export default class BreakpointCommand implements Command {
   helpText = 'Sets a breakpoint on the target.';
 
   detailedHelpText = `
-breakpoint [subcommand | [source-file:]line]
+breakpoint [subcommand | [[o]nce] [source-file:]line] | [[o]nce] function-name()
 
 Sets a breakpoint, or operates on existing breakpoints.
 
@@ -54,11 +59,12 @@ file.
 
 The breakpoint command has several subcommands:
 
-* 'delete' will delete an existing breakpoint
+* 'clear' will delete an existing breakpoint
 * 'disable' will temporarily disable an existing breakpoint
 * 'enable' will re-enable an existing breakpoint
 * 'help' will give detailed information about the subcommands
 * 'list' will list all existing breakpoints
+* 'toggle' will toggle the enabled state of an existing breakpoint
   `;
 
   _debugger: DebuggerInterface;
@@ -68,48 +74,63 @@ The breakpoint command has several subcommands:
   constructor(con: ConsoleIO, debug: DebuggerInterface) {
     this._console = con;
     this._debugger = debug;
-    this._dispatcher = new CommandDispatcher();
+    this._dispatcher = new CommandDispatcher(new Map());
 
-    this._dispatcher.registerCommand(new BreakpointDeleteCommand(debug));
-    this._dispatcher.registerCommand(new BreakpointDisableCommand(debug));
-    this._dispatcher.registerCommand(new BreakpointEnableCommand(debug));
+    this._dispatcher.registerCommand(new BreakpointClearCommand(con, debug));
+    this._dispatcher.registerCommand(new BreakpointDisableCommand(con, debug));
+    this._dispatcher.registerCommand(new BreakpointEnableCommand(con, debug));
     this._dispatcher.registerCommand(new BreakpointListCommand(con, debug));
+    this._dispatcher.registerCommand(new BreakpointToggleCommand(con, debug));
     this._dispatcher.registerCommand(new HelpCommand(con, this._dispatcher));
   }
 
-  async execute(args: string[]): Promise<void> {
-    let result: ?BreakpointSetResult;
-
-    const breakpointSpec = args[0];
-    if (breakpointSpec == null) {
-      result = await this._setBreakpointHere();
-    } else {
-      const linePattern = /^(\d+)$/;
-      const lineMatch = breakpointSpec.match(linePattern);
-      if (lineMatch != null) {
-        result = await this._setBreakpointHere(parseInt(lineMatch[1], 10));
-      } else {
-        const sourceBreakPattern = /^(.+):(\d+)$/;
-        const sourceMatch = breakpointSpec.match(sourceBreakPattern);
-        if (sourceMatch != null) {
-          const [, path, line] = sourceMatch;
-          result = await this._debugger.setSourceBreakpoint(
-            path,
-            parseInt(line, 10),
-          );
-        }
-      }
-    }
-
+  async execute(line: TokenizedLine): Promise<void> {
+    const result = await this._trySettingBreakpoint(line);
     if (result != null) {
       this._displayBreakpointResult(result);
       return;
     }
 
-    // $TODO function breakpoints - not implementing yet because none of the
-    // supported adapters support them
+    const subcommand = new TokenizedLine(line.rest(1));
 
-    await this._dispatcher.executeTokenizedLine(args);
+    const error = await this._dispatcher.executeTokenizedLine(subcommand);
+    if (error != null) {
+      throw error;
+    }
+  }
+
+  async _trySettingBreakpoint(
+    line: TokenizedLine,
+  ): Promise<?BreakpointSetResult> {
+    const parser = new BreakpointCommandParser(line);
+    if (!parser.parse()) {
+      return null;
+    }
+
+    if (parser.sourceFile() == null && parser.functionName() == null) {
+      return this._setBreakpointHere(
+        parser.sourceLine(),
+        parser.once(),
+        parser.condition(),
+      );
+    }
+
+    if (parser.sourceFile() != null) {
+      return this._debugger.setSourceBreakpoint(
+        nullthrows(parser.sourceFile()),
+        nullthrows(parser.sourceLine()),
+        parser.once(),
+        parser.condition(),
+      );
+    }
+
+    const functionName = parser.functionName();
+    invariant(functionName != null);
+    return this._debugger.setFunctionBreakpoint(
+      functionName,
+      parser.once(),
+      parser.condition(),
+    );
   }
 
   _displayBreakpointResult(result: BreakpointSetResult): void {
@@ -119,7 +140,11 @@ The breakpoint command has several subcommands:
     }
   }
 
-  async _setBreakpointHere(line: ?number): Promise<BreakpointSetResult> {
+  async _setBreakpointHere(
+    line: ?number,
+    once: boolean,
+    condition: ?string,
+  ): Promise<BreakpointSetResult> {
     const frame = await this._debugger.getCurrentStackFrame();
     if (frame == null) {
       throw new Error('Cannot set breakpoint here, no current stack frame.');
@@ -134,6 +159,8 @@ The breakpoint command has several subcommands:
     const result = await this._debugger.setSourceBreakpoint(
       frame.source.path,
       line == null ? frame.line : line,
+      once,
+      condition,
     );
     return result;
   }

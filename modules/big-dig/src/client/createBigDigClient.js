@@ -6,24 +6,25 @@
  * LICENSE file in the root directory of this source tree. An additional grant
  * of patent rights can be found in the PATENTS file in the same directory.
  *
- * @flow
+ * @flow strict-local
  * @format
  */
 
-import WS from 'ws';
-import https from 'https';
+import type {ProtocolLogger} from '../socket/QueuedAckTransport';
 
 import {HEARTBEAT_CHANNEL} from '../server/BigDigServer';
-import {WebSocketTransport} from './WebSocketTransport';
 import {BigDigClient} from './BigDigClient';
-import {XhrConnectionHeartbeat} from './XhrConnectionHeartbeat';
+import {ReliableSocket} from '../socket/ReliableSocket';
 
 export type BigDigClientConfig = {
   +host: string,
   +port: number,
-  +certificateAuthorityCertificate?: Buffer | string,
+  +family?: 4 | 6,
+  +certificateAuthorityCertificate?: Buffer | string | Array<string>,
   +clientCertificate?: Buffer | string,
   +clientKey?: Buffer | string,
+  +ignoreIntransientErrors: boolean,
+  +protocolLogger?: ProtocolLogger,
 };
 
 /**
@@ -32,22 +33,38 @@ export type BigDigClientConfig = {
 export default (async function createBigDigClient(
   config: BigDigClientConfig,
 ): Promise<BigDigClient> {
+  const reliableSocket = createReliableSocket(config);
+  const client = new BigDigClient(reliableSocket);
+  try {
+    // Make sure we're able to make the initial connection
+    await reliableSocket.testConnection();
+    return client;
+  } catch (error) {
+    client.close();
+    throw error;
+  }
+});
+
+function createReliableSocket(config: BigDigClientConfig): ReliableSocket {
   const options = {
     ca: config.certificateAuthorityCertificate,
     cert: config.clientCertificate,
     key: config.clientKey,
+    family: config.family,
   };
-  const socket = new WS(`wss://${config.host}:${config.port}/v1`, options);
-  await new Promise((resolve, reject) => {
-    socket.once('open', resolve);
-    socket.once('error', reject);
-  });
-  const agent = new https.Agent(options);
-  const webSocketTransport = new WebSocketTransport('test', agent, socket);
-  const heartbeat = new XhrConnectionHeartbeat(
-    `https://${config.host}:${config.port}`,
+
+  const serverUri = `https://${config.host}:${config.port}/v1`;
+
+  const reliableSocket = new ReliableSocket(
+    serverUri,
     HEARTBEAT_CHANNEL,
     options,
+    config.protocolLogger,
   );
-  return new BigDigClient(webSocketTransport, heartbeat);
-});
+
+  if (!config.ignoreIntransientErrors) {
+    reliableSocket.onIntransientError(error => reliableSocket.close());
+  }
+
+  return reliableSocket;
+}

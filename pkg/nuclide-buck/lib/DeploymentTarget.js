@@ -5,7 +5,7 @@
  * This source code is licensed under the license found in the LICENSE file in
  * the root directory of this source tree.
  *
- * @flow
+ * @flow strict-local
  * @format
  */
 
@@ -17,19 +17,14 @@ import type {
   Platform,
   PlatformGroup,
   PlatformProviderUi,
+  PreferredNames,
 } from './types';
 
 import invariant from 'assert';
 
-type PreferredNames = {
-  platformGroupName: ?string,
-  platformName: ?string,
-  deviceGroupName: ?string,
-  deviceName: ?string,
-};
-
 export function getDeploymentTargetPreference(state: AppState): PreferredNames {
-  const target = state.selectedDeploymentTarget;
+  const target =
+    state.userSelectedDeploymentTarget || state.selectedDeploymentTarget;
   // If a deployment target exists, that's our first choice, otherwise look at the last session
   if (target != null) {
     return {

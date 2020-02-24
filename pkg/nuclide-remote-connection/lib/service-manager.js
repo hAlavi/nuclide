@@ -20,11 +20,11 @@ import {ServerConnection} from './ServerConnection';
 import nuclideUri from 'nuclide-commons/nuclideUri';
 import {fork, spawn, getOriginalEnvironment} from 'nuclide-commons/process';
 import featureConfig from 'nuclide-commons-atom/feature-config';
-import {__DEV__} from '../../commons-node/runtime-info';
-import {getAvailableServerPort} from '../../commons-node/serverPort';
+import {__DEV__} from 'nuclide-commons/runtime-info';
+import {getAvailableServerPort} from 'nuclide-commons/serverPort';
 import servicesConfig from '../../nuclide-server/lib/servicesConfig';
 import {RpcConnection} from '../../nuclide-rpc';
-import {getAtomSideLoopbackMarshalers} from '../../nuclide-marshalers-atom';
+import {getClientSideLoopbackMarshalers} from '../../nuclide-marshalers-client';
 
 // This code may be executed before the config has been loaded!
 // getWithDefaults is necessary to make sure that the default is 'true'.
@@ -69,11 +69,7 @@ function createLocalRpcClient(): RpcConnection<Transport> {
                 require.resolve('../../commons-node/load-transpiler'),
                 require.resolve('./LocalRpcServer'),
               ],
-              {
-                ...spawnOptions,
-                // Enable the source-maps hook in nuclide-node-transpiler.
-                env: {...env, NUCLIDE_TRANSPILE_WITH_SOURCEMAPS: '1'},
-              },
+              spawnOptions,
             ),
           )
       : fork(
@@ -88,7 +84,7 @@ function createLocalRpcClient(): RpcConnection<Transport> {
   const transport = new IpcClientTransport(localServerProcess);
   return RpcConnection.createLocal(
     transport,
-    getAtomSideLoopbackMarshalers,
+    getClientSideLoopbackMarshalers,
     servicesConfig,
   );
 }

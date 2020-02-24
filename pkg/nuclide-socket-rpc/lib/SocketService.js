@@ -5,16 +5,17 @@
  * This source code is licensed under the license found in the LICENSE file in
  * the root directory of this source tree.
  *
- * @flow
+ * @flow strict-local
  * @format
  */
 
 import * as Tunnel from './Tunnel';
 import {ConnectionFactory} from './Connection';
-import {getAvailableServerPort as _getAvailableServerPort} from '../../commons-node/serverPort';
+import {getAvailableServerPort as _getAvailableServerPort} from 'nuclide-commons/serverPort';
 
-import type {TunnelDescriptor, SocketEvent} from './types.js';
+import type {ResolvedTunnel} from 'nuclide-adb/lib/types';
 import type {ConnectableObservable} from 'rxjs';
+import type {SocketEvent} from './types';
 
 /**
  * The role of the Connection Factory is to create
@@ -26,10 +27,10 @@ export function getConnectionFactory(): Promise<ConnectionFactory> {
 }
 
 export function createTunnel(
-  td: TunnelDescriptor,
+  t: ResolvedTunnel,
   cf: ConnectionFactory,
 ): ConnectableObservable<SocketEvent> {
-  return Tunnel.createTunnel(td, cf);
+  return Tunnel.createTunnel(t, cf);
 }
 
 export async function getAvailableServerPort(): Promise<number> {

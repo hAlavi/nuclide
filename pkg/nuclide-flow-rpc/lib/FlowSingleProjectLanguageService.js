@@ -23,12 +23,13 @@ import type {
 import type {
   DefinitionQueryResult,
   FindReferencesReturn,
+  RenameReturn,
   Reference,
   Outline,
   CodeAction,
+  SignatureHelp,
 } from 'atom-ide-ui';
 import type {SingleFileLanguageService} from '../../nuclide-language-service-rpc';
-import type {NuclideEvaluationExpression} from 'nuclide-debugger-common';
 import type {TextEdit} from 'nuclide-commons-atom/text-edit';
 import type {TypeHint} from '../../nuclide-type-hint/lib/rpc-types';
 
@@ -172,18 +173,25 @@ export class FlowSingleProjectLanguageService {
     if (!isSupported) {
       return null;
     }
-    const result = await this._findRefs(filePath, buffer, position, false);
+    const result = await this.customFindReferences(
+      filePath,
+      buffer,
+      position,
+      false,
+      false,
+    );
     if (result == null || result.type === 'error') {
       return null;
     }
     return result.references.map(ref => ref.range);
   }
 
-  async _findRefs(
+  async customFindReferences(
     filePath: NuclideUri,
     buffer: simpleTextBuffer$TextBuffer,
     position: atom$Point,
     global_: boolean,
+    multiHop: boolean,
   ): Promise<?FindReferencesReturn> {
     const options = {input: buffer.getText()};
     const args = [
@@ -196,6 +204,9 @@ export class FlowSingleProjectLanguageService {
     ];
     if (global_) {
       args.push('--global');
+    }
+    if (multiHop) {
+      args.push('--multi-hop');
     }
     try {
       const result = await this._process.execFlow(args, options);
@@ -375,6 +386,10 @@ export class FlowSingleProjectLanguageService {
     }
   }
 
+  resolveAutocompleteSuggestion(suggestion: Completion): Promise<?Completion> {
+    return Promise.resolve(null);
+  }
+
   async typeHint(
     filePath: NuclideUri,
     buffer: simpleTextBuffer$TextBuffer,
@@ -462,9 +477,13 @@ export class FlowSingleProjectLanguageService {
       .map(range => ({range}));
 
     return {
-      percentage: totalCount === 0 ? 100 : coveredCount / totalCount * 100,
+      percentage: totalCount === 0 ? 100 : (coveredCount / totalCount) * 100,
       uncoveredRegions,
     };
+  }
+
+  async onToggleCoverage(set: boolean): Promise<void> {
+    return;
   }
 
   async _forceRecheck(file: string): Promise<boolean> {
@@ -596,6 +615,14 @@ export class FlowSingleProjectLanguageService {
     throw new Error('Not Yet Implemented');
   }
 
+  signatureHelp(
+    filePath: NuclideUri,
+    buffer: simpleTextBuffer$TextBuffer,
+    position: atom$Point,
+  ): Promise<?SignatureHelp> {
+    throw new Error('Not implemented');
+  }
+
   findReferences(
     filePath: NuclideUri,
     buffer: simpleTextBuffer$TextBuffer,
@@ -603,15 +630,16 @@ export class FlowSingleProjectLanguageService {
   ): Observable<?FindReferencesReturn> {
     // TODO check flow version
     return Observable.fromPromise(
-      this._findRefs(filePath, buffer, position, true),
+      this.customFindReferences(filePath, buffer, position, true, false),
     );
   }
 
-  getEvaluationExpression(
+  rename(
     filePath: NuclideUri,
     buffer: simpleTextBuffer$TextBuffer,
     position: atom$Point,
-  ): Promise<?NuclideEvaluationExpression> {
+    newName: string,
+  ): Observable<?RenameReturn> {
     throw new Error('Not implemented');
   }
 
@@ -633,6 +661,10 @@ export class FlowSingleProjectLanguageService {
     currentSelection: atom$Range,
     originalCursorPosition: atom$Point,
   ): Promise<?atom$Range> {
+    throw new Error('Not Yet Implemented');
+  }
+
+  onWillSave(filePath: NuclideUri): Promise<Array<TextEdit>> {
     throw new Error('Not Yet Implemented');
   }
 }

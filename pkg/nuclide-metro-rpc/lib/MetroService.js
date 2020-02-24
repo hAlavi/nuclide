@@ -52,8 +52,10 @@ export async function getStartCommand(
 export function startMetro(
   projectRoot: NuclideUri,
   editorArgs: Array<string>,
+  port: number = 8081,
+  extraArgs: Array<string> = [],
 ): ConnectableObservable<MetroEvent> {
-  const stdout = Observable.defer(() => getStartCommand(projectRoot))
+  const output = Observable.defer(() => getStartCommand(projectRoot))
     .switchMap(
       commandInfo =>
         commandInfo == null
@@ -61,31 +63,35 @@ export function startMetro(
           : Observable.of(commandInfo),
     )
     .switchMap(commandInfo => {
-      const {command, cwd, args} = commandInfo;
-      return observeProcess(command, args, {
-        cwd,
-        env: {
-          ...process.env,
-          REACT_EDITOR: shellQuote(editorArgs),
-          // We don't want to pass the NODE_PATH from this process
-          NODE_PATH: null,
+      const {command, cwd} = commandInfo;
+      return observeProcess(
+        command,
+        extraArgs.concat(commandInfo.args || []).concat([`--port=${port}`]),
+        {
+          cwd,
+          env: {
+            ...process.env,
+            REACT_EDITOR: shellQuote(editorArgs),
+            // We don't want to pass the NODE_PATH from this process
+            NODE_PATH: null,
+          },
+          killTreeWhenDone: true,
         },
-        killTreeWhenDone: true,
-      }).catch(error => {
-        if (error.exitCode === 11) {
+      ).catch(error => {
+        if (error.exitCode === 22) {
           return Observable.throw(metroPortBusyError());
         } else {
           return Observable.throw(error);
         }
       });
     })
-    .filter(event => event.kind === 'stdout')
+    .filter(event => event.kind === 'stdout' || event.kind === 'stderr')
     .map(event => {
-      invariant(event.kind === 'stdout');
+      invariant(event.kind === 'stdout' || event.kind === 'stderr');
       return event.data;
     });
 
-  return parseMessages(stdout).publish();
+  return parseMessages(output).publish();
 }
 
 function noMetroProjectError(): Error {
@@ -100,9 +106,9 @@ function metroPortBusyError(): Error {
   return error;
 }
 
-export async function reloadApp(): Promise<void> {
+export async function reloadApp(port: number = 8081): Promise<void> {
   return new Promise((resolve, reject) => {
-    const url = 'ws://localhost:8081/message?role=interface&name=Nuclide';
+    const url = `ws://localhost:${port}/message?role=interface&name=Nuclide`;
     const message = {
       version: 2,
       method: 'reload',
@@ -123,15 +129,17 @@ export async function reloadApp(): Promise<void> {
 export async function buildBundle(
   bundleName: string,
   platform: 'ios' | 'android',
+  port: number = 8081,
 ): Promise<void> {
-  const url = `http://localhost:8081/${bundleName}.bundle?platform=${platform}&dev=true&minify=false`;
+  const url = `http://localhost:${port}/${bundleName}.bundle?platform=${platform}&dev=true&minify=false`;
   await xfetch(url, {method: 'HEAD'});
 }
 
 export async function buildSourceMaps(
   bundleName: string,
   platform: 'ios' | 'android',
+  port: number = 8081,
 ): Promise<void> {
-  const url = `http://localhost:8081/${bundleName}.map?platform=${platform}&dev=true&minify=false`;
+  const url = `http://localhost:${port}/${bundleName}.map?platform=${platform}&dev=true&minify=false`;
   await xfetch(url, {method: 'HEAD'});
 }

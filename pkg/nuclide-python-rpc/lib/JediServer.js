@@ -5,7 +5,7 @@
  * This source code is licensed under the license found in the LICENSE file in
  * the root directory of this source tree.
  *
- * @flow
+ * @flow strict-local
  * @format
  */
 
@@ -26,7 +26,7 @@ const OPTS = {
   cwd: nuclideUri.dirname(PROCESS_PATH),
   stdio: 'pipe',
   detached: false, // When Atom is killed, server process should be killed.
-  env: {PYTHONPATH: LIB_PATH},
+  env: {...process.env, PYTHONPATH: LIB_PATH},
   /* TODO(T17353599) */ isExitError: () => false,
 };
 

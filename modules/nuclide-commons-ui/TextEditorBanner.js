@@ -85,37 +85,47 @@ export class TextEditorBanner {
       .scrollToCursorPosition();
   }
 
-  render(reactElement: React.Element<any>) {
+  render = (reactElement: React.Element<any>): void => {
+    this.renderUnstyled(
+      <div className="nuclide-ui-text-editor-banner-element">
+        {reactElement}
+      </div>,
+    );
+  };
+
+  renderUnstyled = (reactElement: React.Element<any>): void => {
     ReactDOM.render(
       <div className="nuclide-ui-text-editor-banner">
-        <div className="nuclide-ui-text-editor-banner-element">
-          {reactElement}
-        </div>
+        {reactElement}
         <div
+          // eslint-disable-next-line nuclide-internal/jsx-simple-callback-refs
           ref={ref => this._updateTextEditorElement(ref)}
           className="nuclide-ui-text-editor-banner-editor"
         />
       </div>,
       this._element,
     );
-  }
+  };
 
   hide() {
     this.dispose();
   }
 }
 
-type NoticeProps = {
+type NoticeProps = {|
   messageType: MessageType,
   children: React.Node,
-};
+  contentStyle?: {[key: string]: any},
+|};
 
 export class Notice extends React.Component<NoticeProps> {
   render() {
     return (
       <div className="nuclide-ui-text-editor-banner-notice">
         <Message type={this.props.messageType}>
-          <div className="nuclide-ui-text-editor-banner-notice-content">
+          <div
+            className="nuclide-ui-text-editor-banner-notice-content"
+            style={this.props.contentStyle}>
             {this.props.children}
           </div>
         </Message>

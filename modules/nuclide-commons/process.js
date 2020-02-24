@@ -66,6 +66,8 @@ import {shellQuote} from './string';
 
 export const LOG_CATEGORY = 'nuclide-commons/process';
 
+const NUCLIDE_DO_NOT_LOG = global.NUCLIDE_DO_NOT_LOG;
+
 const logger = getLogger(LOG_CATEGORY);
 
 /**
@@ -86,8 +88,9 @@ const logger = getLogger(LOG_CATEGORY);
  *
  * The observable returned by this function can error with any of the following:
  *
- * - [Node System Errors][2] Represented as augmented `Error` objects, these errors include things
- *   like `ENOENT`.
+ * - `ProcessSystemError` Wrap [Node System Errors][2] (which are just augmented `Error` objects)
+ *    and include things like `ENOENT`. These contain all of the properties of node system errors
+ *    as well as a reference to the process.
  * - `ProcessExitError` Indicate that the process has ended cleanly, but with an unsuccessful exit
  *    code. Whether a `ProcessExitError` is thrown is determined by the `isExitError` option. This
  *    error includes the exit code as well as accumulated stdout and stderr. See its definition for
@@ -422,8 +425,9 @@ export function scriptifyCommand<T>(
 export function killProcess(
   proc: child_process$ChildProcess,
   killTree: boolean,
+  killTreeSignal: ?string,
 ): void {
-  _killProcess(proc, killTree).then(
+  _killProcess(proc, killTree, killTreeSignal).then(
     () => {},
     error => {
       logger.error(`Killing process ${proc.pid} failed`, error);
@@ -444,8 +448,12 @@ export function killPid(pid: number): void {
   }
 }
 
-// If provided, read the original environment from NUCLIDE_ORIGINAL_ENV.
-// This should contain the base64-encoded output of `env -0`.
+// Inside FB, Nuclide's RPC process doesn't inherit its parent environment and sets up its own instead.
+// It does this to prevent difficult-to-diagnose issues caused by unexpected code in users' dotfiles.
+// Before overwriting it, the original environment is base64-encoded in NUCLIDE_ORIGINAL_ENV.
+// WARNING: This function returns the environment that would have been inherited under normal conditions.
+// You can use it with a child process to let the user set its environment variables. By doing so, you are creating
+// an even more complicated mess of inheritance and non-inheritance in the process tree.
 let cachedOriginalEnvironment = null;
 export async function getOriginalEnvironment(): Promise<Object> {
   await new Promise(resolve => {
@@ -476,6 +484,26 @@ export async function getOriginalEnvironment(): Promise<Object> {
     cachedOriginalEnvironment = process.env;
   }
   return cachedOriginalEnvironment;
+}
+
+// See getOriginalEnvironment above.
+export async function getOriginalEnvironmentArray(): Promise<Array<string>> {
+  await new Promise(resolve => {
+    whenShellEnvironmentLoaded(resolve);
+  });
+  const {NUCLIDE_ORIGINAL_ENV} = process.env;
+  if (NUCLIDE_ORIGINAL_ENV != null && NUCLIDE_ORIGINAL_ENV.trim() !== '') {
+    const envString = new Buffer(NUCLIDE_ORIGINAL_ENV, 'base64').toString();
+    return envString.split('\0');
+  }
+  return [];
+}
+
+export async function getEnvironment(): Promise<Object> {
+  await new Promise(resolve => {
+    whenShellEnvironmentLoaded(resolve);
+  });
+  return process.env;
 }
 
 /**
@@ -528,35 +556,95 @@ async function getDescendantsOfProcess(
 }
 
 export async function psTree(): Promise<Array<ProcessInfo>> {
-  const stdout = isWindowsPlatform()
-    ? // See also: https://github.com/nodejs/node-v0.x-archive/issues/2318
-      await runCommand('wmic.exe', [
-        'PROCESS',
-        'GET',
-        'ParentProcessId,ProcessId,Name',
-      ]).toPromise()
-    : await runCommand('ps', ['-A', '-o', 'ppid,pid,comm']).toPromise();
+  if (isWindowsPlatform()) {
+    return psTreeWindows();
+  }
+  const [commands, withArgs] = await Promise.all([
+    runCommand('ps', ['-A', '-o', 'ppid,pid,comm']).toPromise(),
+    runCommand('ps', ['-A', '-ww', '-o', 'pid,args']).toPromise(),
+  ]);
+
+  return parsePsOutput(commands, withArgs);
+}
+
+async function psTreeWindows(): Promise<Array<ProcessInfo>> {
+  const stdout = await runCommand('wmic.exe', [
+    'PROCESS',
+    'GET',
+    'ParentProcessId,ProcessId,Name',
+  ]).toPromise();
   return parsePsOutput(stdout);
 }
 
-export function parsePsOutput(psOutput: string): Array<ProcessInfo> {
+export function parsePsOutput(
+  psOutput: string,
+  argsOutput: ?string,
+): Array<ProcessInfo> {
   // Remove the first header line.
   const lines = psOutput
     .trim()
     .split(/\n|\r\n/)
     .slice(1);
 
+  let withArgs = new Map();
+  if (argsOutput != null) {
+    withArgs = new Map(
+      argsOutput
+        .trim()
+        .split(/\n|\r\n/)
+        .slice(1)
+        .map(line => {
+          const columns = line.trim().split(/\s+/);
+          const pid = parseInt(columns[0], 10);
+          const command = columns.slice(1).join(' ');
+          return [pid, command];
+        }),
+    );
+  }
+
   return lines.map(line => {
     const columns = line.trim().split(/\s+/);
-    const [parentPid, pid] = columns;
+    const [parentPid, pidStr] = columns;
+    const pid = parseInt(pidStr, 10);
     const command = columns.slice(2).join(' ');
+    const commandWithArgs = withArgs.get(pid);
 
     return {
       command,
       parentPid: parseInt(parentPid, 10),
-      pid: parseInt(pid, 10),
+      pid,
+      commandWithArgs: commandWithArgs == null ? command : commandWithArgs,
     };
   });
+}
+
+// Use `ps` to get memory usage in kb for an array of process id's as a map.
+export async function memoryUsagePerPid(
+  pids: Array<number>,
+): Promise<Map<number, number>> {
+  const usage = new Map();
+  if (pids.length >= 1) {
+    try {
+      const stdout = await runCommand('ps', [
+        '-p',
+        pids.join(','),
+        '-o',
+        'pid=',
+        '-o',
+        'rss=',
+      ]).toPromise();
+      stdout.split('\n').forEach(line => {
+        const parts = line.trim().split(/\s+/);
+        if (parts.length === 2) {
+          const [pid, rss] = parts.map(x => parseInt(x, 10));
+          usage.set(pid, rss);
+        }
+      });
+    } catch (err) {
+      // Ignore errors.
+    }
+  }
+  return usage;
 }
 
 /**
@@ -627,6 +715,7 @@ export type ProcessInfo = {
   parentPid: number,
   pid: number,
   command: string,
+  commandWithArgs: string,
 };
 
 export type Level = 'info' | 'log' | 'warning' | 'error' | 'debug' | 'success';
@@ -647,9 +736,11 @@ export type ResultEvent = {
   result: mixed,
 };
 
+export type Status = {type: string, object: mixed};
+
 export type StatusEvent = {
   type: 'status',
-  status: ?string,
+  status: Status,
 };
 
 export type TaskEvent =
@@ -660,8 +751,10 @@ export type TaskEvent =
 
 type CreateProcessStreamOptions = (
   | child_process$spawnOpts
-  | child_process$forkOpts) & {
+  | child_process$forkOpts
+) & {
   killTreeWhenDone?: ?boolean,
+  killTreeSignal?: string,
   timeout?: ?number,
   input?: ?(string | Observable<string>),
   dontLogInNuclide?: ?boolean,
@@ -837,6 +930,67 @@ function logCall(duration: number, command: string, args: Array<string>) {
 }
 
 /**
+ * Attempt to get the fully qualified binary name from a process id. This is
+ * surprisingly tricky. 'ps' only reports the path as invoked, and in some cases
+ * not even that.
+ *
+ * On Linux, the /proc filesystem can be used to find it.
+ * macOS doesn't have /proc, so we rely on the fact that the process holds
+ * an open FD to the executable. This can fail for various reasons (mostly
+ * not having permissions to execute lsof on the pid.)
+ */
+export async function getAbsoluteBinaryPathForPid(
+  pid: number,
+): Promise<?string> {
+  if (process.platform === 'linux') {
+    return _getLinuxBinaryPathForPid(pid);
+  }
+
+  if (process.platform === 'darwin') {
+    return _getDarwinBinaryPathForPid(pid);
+  }
+
+  return null;
+}
+
+async function _getLinuxBinaryPathForPid(pid: number): Promise<?string> {
+  const exeLink = `/proc/${pid}/exe`;
+  // /proc/xxx/exe is a symlink to the real binary in the file system.
+  return runCommand('/bin/realpath', ['-q', '-e', exeLink])
+    .catch(_ =>
+      runCommand('/bin/sudo', [
+        '-n',
+        '--',
+        '/bin/realpath',
+        '-q',
+        '-e',
+        exeLink,
+      ]),
+    )
+    .catch(_ => Observable.of(null))
+    .toPromise();
+}
+
+async function _getDarwinBinaryPathForPid(pid: number): Promise<?string> {
+  return runCommand('/usr/sbin/lsof', ['-p', `${pid}`])
+    .catch(_ => {
+      return Observable.of(null);
+    })
+    .map(
+      stdout =>
+        stdout == null
+          ? null
+          : stdout
+              .split('\n')
+              .map(line => line.trim().split(/\s+/))
+              .filter(line => line[3] === 'txt')
+              .map(line => line[8])[0],
+    )
+    .take(1)
+    .toPromise();
+}
+
+/**
  * Creates an observable with the following properties:
  *
  * 1. It contains a process that's created using the provided factory when you subscribe.
@@ -866,7 +1020,12 @@ function createProcessStream(
   return observableFromSubscribeFunction(whenShellEnvironmentLoaded)
     .take(1)
     .switchMap(() => {
-      const {dontLogInNuclide, killTreeWhenDone, timeout} = options;
+      const {
+        dontLogInNuclide,
+        killTreeWhenDone,
+        killTreeSignal,
+        timeout,
+      } = options;
       // flowlint-next-line sketchy-null-number:off
       const enforceTimeout = timeout
         ? x =>
@@ -907,7 +1066,7 @@ function createProcessStream(
         .filter(isRealExit)
         .take(1);
 
-      if (dontLogInNuclide !== true) {
+      if (dontLogInNuclide !== true && NUCLIDE_DO_NOT_LOG !== true) {
         // Log the completion of the process. Note that we intentionally don't merge this with the
         // returned observable because we don't want to cancel the side-effect when the user
         // unsubscribes or when the process exits ("close" events come after "exit" events).
@@ -979,9 +1138,9 @@ function createProcessStream(
           throw err;
         })
         .finally(() => {
-          // flowlint-next-line sketchy-null-mixed:off
+          // $FlowFixMe(>=0.68.0) Flow suppress (T27187857)
           if (!proc.wasKilled && !finished) {
-            killProcess(proc, Boolean(killTreeWhenDone));
+            killProcess(proc, Boolean(killTreeWhenDone), killTreeSignal);
           }
         });
     });
@@ -995,10 +1154,15 @@ function isRealExit(event: {exitCode: ?number, signal: ?string}): boolean {
 async function _killProcess(
   proc: child_process$ChildProcess & {wasKilled?: boolean},
   killTree: boolean,
+  killTreeSignal: ?string,
 ): Promise<void> {
   proc.wasKilled = true;
   if (!killTree) {
-    proc.kill();
+    if (killTreeSignal != null && killTreeSignal !== '') {
+      proc.kill(killTreeSignal);
+    } else {
+      proc.kill();
+    }
     return;
   }
   if (/^win/.test(process.platform)) {

@@ -6,7 +6,7 @@
  * LICENSE file in the root directory of this source tree. An additional grant
  * of patent rights can be found in the PATENTS file in the same directory.
  *
- * @flow
+ * @flow strict-local
  * @format
  */
 
@@ -167,7 +167,7 @@ export class CodeActionManager {
             this._diagnosticUpdater == null
               ? []
               : this._diagnosticUpdater
-                  .getFileMessageUpdates(file)
+                  .getFileMessages(file)
                   .messages.filter(
                     message =>
                       message.range && message.range.intersectsWith(range),

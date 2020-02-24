@@ -6,7 +6,7 @@
  * LICENSE file in the root directory of this source tree. An additional grant
  * of patent rights can be found in the PATENTS file in the same directory.
  *
- * @flow
+ * @flow strict-local
  * @format
  */
 
@@ -39,10 +39,18 @@ export default class VsAdapterSpawner implements IVsAdapterSpawner {
             'pipe', // stdout
             'pipe', // stderr
           ],
-          env,
+          env: {...env, ELECTRON_RUN_AS_NODE: 1, ...adapter.env},
           input: Observable.from(stdinBuffer).concat(this._stdin),
           killTreeWhenDone: true,
+          killTreeSignal: 'SIGKILL',
+          isExitError: () => false,
+          cwd: adapter.cwd == null ? undefined : adapter.cwd,
         };
+        if (adapter.command === 'node') {
+          adapter.command = process.execPath;
+        } else if (adapter.command === 'sudo' && adapter.args[0] === 'node') {
+          adapter.args[0] = process.execPath;
+        }
         return observeProcessRaw(adapter.command, adapter.args, options);
       })
       .publish();

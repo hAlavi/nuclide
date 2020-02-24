@@ -5,7 +5,7 @@
  * This source code is licensed under the license found in the LICENSE file in
  * the root directory of this source tree.
  *
- * @flow
+ * @flow strict-local
  * @format
  */
 
@@ -16,10 +16,9 @@ import type {
   DeviceTaskProvider,
   DeviceProcessTaskProvider,
   DeviceTypeTaskProvider,
-  DeviceActionProvider,
   DeviceAppInfoProvider,
   DeviceTypeComponentProvider,
-} from './types';
+} from 'nuclide-debugger-common/types';
 
 type DeviceProviders = {
   deviceList: Set<DeviceListProvider>,
@@ -28,7 +27,6 @@ type DeviceProviders = {
   deviceProcesses: Set<DeviceProcessesProvider>,
   processTask: Set<DeviceProcessTaskProvider>,
   deviceTypeTask: Set<DeviceTypeTaskProvider>,
-  deviceAction: Set<DeviceActionProvider>,
   appInfo: Set<DeviceAppInfoProvider>,
   deviceTypeComponent: Set<DeviceTypeComponentProvider>,
 };

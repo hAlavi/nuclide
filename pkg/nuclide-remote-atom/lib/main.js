@@ -5,7 +5,7 @@
  * This source code is licensed under the license found in the LICENSE file in
  * the root directory of this source tree.
  *
- * @flow
+ * @flow strict-local
  * @format
  */
 
@@ -13,11 +13,14 @@ import typeof * as RemoteCommandServiceType from '../../nuclide-remote-atom-rpc/
 import type {
   AtomCommands,
   AtomFileEvent,
+  AtomNotification,
+  ProjectState,
 } from '../../nuclide-remote-atom-rpc/lib/rpc-types';
 import type {NuclideUri} from 'nuclide-commons/nuclideUri';
 import type {ConnectableObservable} from 'rxjs';
 import type {DeepLinkService} from '../../nuclide-deep-link/lib/types';
 import type {RemoteProjectsService} from '../../nuclide-remote-projects';
+import {clipboard} from 'electron';
 
 import invariant from 'assert';
 import querystring from 'querystring';
@@ -36,6 +39,7 @@ import {ServerConnection} from '../../nuclide-remote-connection';
 import nuclideUri from 'nuclide-commons/nuclideUri';
 import {getNotifierByConnection} from '../../nuclide-open-files';
 import {shell} from 'electron';
+import {restrictLength} from '../../nuclide-remote-atom-rpc/shared/MessageLength';
 
 const REMOTE_COMMAND_SERVICE = 'RemoteCommandService';
 const ATOM_URI_ADD_PATH = 'add-path';
@@ -93,6 +97,29 @@ class Activation {
           shell.openExternal(url);
         }
       },
+
+      async getProjectState(): Promise<ProjectState> {
+        return {
+          rootFolders: atom.project.getPaths(),
+        };
+      },
+
+      addNotification(notification: AtomNotification): Promise<void> {
+        const {type, message} = notification;
+        const {description, detail, icon, dismissable} = notification;
+        const options = {description, detail, icon, dismissable};
+        atom.notifications.add(type, message, options);
+        return Promise.resolve();
+      },
+
+      async getClipboardContents(): Promise<string> {
+        return restrictLength(clipboard.readText());
+      },
+
+      async setClipboardContents(text: string): Promise<void> {
+        clipboard.writeText(text);
+      },
+
       dispose(): void {},
     };
 
@@ -114,10 +141,7 @@ class Activation {
           connection,
         );
         const fileNotifier = await getNotifierByConnection(connection);
-        return service.RemoteCommandService.registerAtomCommands(
-          fileNotifier,
-          this._commands,
-        );
+        return service.registerAtomCommands(fileNotifier, this._commands);
       }),
     );
   }
@@ -150,10 +174,9 @@ class Activation {
 
         getLogger().info(`Attempting to addProject(${projectPath}).`);
         const hostname = nuclideUri.getHostname(projectPath);
-        const cwd = nuclideUri.getPath(projectPath);
         await remoteProjectsService.createRemoteConnection({
           host: hostname,
-          cwd,
+          path: nuclideUri.getPath(projectPath),
           displayTitle: hostname,
         });
       },

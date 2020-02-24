@@ -19,7 +19,7 @@ import ReactDOM from 'react-dom';
 import invariant from 'assert';
 import {Observable, Subject} from 'rxjs';
 
-import analytics from 'nuclide-commons-atom/analytics';
+import analytics from 'nuclide-commons/analytics';
 import ActiveEditorRegistry from 'nuclide-commons-atom/ActiveEditorRegistry';
 import UniversalDisposable from 'nuclide-commons/UniversalDisposable';
 
@@ -57,15 +57,18 @@ class Activation {
     );
 
     this._disposables = new UniversalDisposable();
-    this._activeEditorRegistry = new ActiveEditorRegistry(resultFunction, {
-      updateOnEdit: false,
-    });
+    this._activeEditorRegistry = new ActiveEditorRegistry(resultFunction);
 
     this._disposables.add(
       atom.commands.add(
         'atom-workspace',
         'nuclide-type-coverage:toggle-inline-display',
         () => this._toggleEvents.next(),
+      ),
+      this._shouldRenderDiagnostics.subscribe(shouldRender =>
+        this._activeEditorRegistry._providerRegistry._providers.forEach(
+          provider => provider.onToggle && provider.onToggle(shouldRender),
+        ),
       ),
     );
 
@@ -81,7 +84,9 @@ class Activation {
   }
 
   consumeStatusBar(statusBar: atom$StatusBar): IDisposable {
-    const item = document.createElement('span');
+    const item = document.createElement('div');
+    item.classList.add('inline-block');
+    item.style.height = '100%';
 
     const statusBarTile = statusBar.addLeftTile({
       item,

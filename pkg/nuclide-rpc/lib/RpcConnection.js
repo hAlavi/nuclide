@@ -9,18 +9,22 @@
  * @format
  */
 
-import type {ConfigEntry, Transport} from './index';
-import type {ReturnType, Type, Parameter} from './types';
+import type {Transport} from './index';
+import type {
+  ReturnType,
+  Type,
+  Parameter,
+  ConfigEntry,
+  PredefinedTransformer,
+} from './types';
 import type {TypeRegistry} from './TypeRegistry';
 import type {
   ResponseMessage,
   RequestMessage,
   CallMessage,
   CallObjectMessage,
-  NewObjectMessage,
 } from './messages';
 import type {ClassDefinition, FunctionImplementation} from './ServiceRegistry';
-import type {PredefinedTransformer} from './index';
 import type {MemoryLogger} from '../../commons-node/memoryLogger';
 
 import invariant from 'assert';
@@ -30,7 +34,6 @@ import {ObjectRegistry} from './ObjectRegistry';
 import {
   createCallMessage,
   createCallObjectMessage,
-  createNewObjectMessage,
   createDisposeMessage,
   createUnsubscribeMessage,
   createPromiseMessage,
@@ -40,8 +43,8 @@ import {
   createObserveErrorMessage,
   decodeError,
 } from './messages';
-import {builtinLocation, voidType} from './builtin-types';
-import {track, trackTiming} from '../../nuclide-analytics';
+import {voidType} from './builtin-types';
+import {track, trackTiming} from 'nuclide-analytics';
 import {SERVICE_FRAMEWORK3_PROTOCOL} from './config';
 import {shorten} from 'nuclide-commons/string';
 import {getLogger} from 'log4js';
@@ -73,7 +76,7 @@ class Subscription {
     try {
       this._observer.error(decodeError(this._message, error));
     } catch (e) {
-      logger.error(`Caught exception in Subscription.error: ${e.toString()}`);
+      logger.error('Caught exception in Subscription.error', e);
     }
   }
 
@@ -83,7 +86,7 @@ class Subscription {
       // TODO: consider implementing a rate limit
       this._totalBytes += bytes;
     } catch (e) {
-      logger.error(`Caught exception in Subscription.next: ${e.toString()}`);
+      logger.error('Caught exception in Subscription.next', e);
     }
   }
 
@@ -91,9 +94,7 @@ class Subscription {
     try {
       this._observer.complete();
     } catch (e) {
-      logger.error(
-        `Caught exception in Subscription.complete: ${e.toString()}`,
-      );
+      logger.error('Caught exception in Subscription.complete', e);
     }
   }
 
@@ -172,7 +173,11 @@ class Call {
       this._reject(
         new RpcTimeoutError(
           `Timeout after ${SERVICE_FRAMEWORK_RPC_TIMEOUT_MS} for id: ` +
-            `${this._message.id}, ${timeoutMessage}.`,
+            `${
+              this._message.id
+            }, ${timeoutMessage}. Nuclide was trying to call ` +
+            'to the remote Nuclide server. This usually means the server was ' +
+            'not reachable, or the network connection is unreliable.',
         ),
       );
     }
@@ -221,6 +226,7 @@ export class RpcConnection<TransportType: Transport> {
       this._serviceRegistry,
       this,
     );
+    // eslint-disable-next-line nuclide-internal/unused-subscription
     this._transport.onMessage().subscribe(message => {
       this._handleMessage(message);
     });
@@ -273,7 +279,7 @@ export class RpcConnection<TransportType: Transport> {
   ): RpcConnection<TransportType> {
     return new RpcConnection(
       'client',
-      new ServiceRegistry(predefinedTypes, services, protocol),
+      new ServiceRegistry(predefinedTypes, services, protocol, {lazy: true}),
       transport,
       options,
       connectionId,
@@ -325,10 +331,7 @@ export class RpcConnection<TransportType: Transport> {
     return this._getTypeRegistry().unmarshal(this._objectRegistry, value, type);
   }
 
-  marshalArguments(
-    args: Array<any>,
-    argTypes: Array<Parameter>,
-  ): Promise<Object> {
+  marshalArguments(args: Array<any>, argTypes: Array<Parameter>): Object {
     return this._getTypeRegistry().marshalArguments(
       this._objectRegistry,
       args,
@@ -336,10 +339,7 @@ export class RpcConnection<TransportType: Transport> {
     );
   }
 
-  unmarshalArguments(
-    args: Object,
-    argTypes: Array<Parameter>,
-  ): Promise<Array<any>> {
+  unmarshalArguments(args: Object, argTypes: Array<Parameter>): Array<any> {
     return this._getTypeRegistry().unmarshalArguments(
       this._objectRegistry,
       args,
@@ -394,52 +394,18 @@ export class RpcConnection<TransportType: Transport> {
         args,
       ),
       returnType,
-      `Calling remote method ${methodName}.`,
+      `Calling remote method ${methodName}`,
     );
   }
 
   /**
-   * Call a remote constructor, returning an id that eventually resolves to a unique identifier
-   * for the object.
-   * @param interfaceName - The name of the remote class for which to construct an object.
-   * @param thisArg - The newly created proxy object.
-   * @param unmarshalledArgs - Unmarshalled arguments to pass to the remote constructor.
-   * @param argTypes - Types of arguments.
-   */
-  createRemoteObject(
-    interfaceName: string,
-    thisArg: Object,
-    unmarshalledArgs: Array<any>,
-    argTypes: Array<Parameter>,
-  ): void {
-    const idPromise = (async () => {
-      const marshalledArgs = await this._getTypeRegistry().marshalArguments(
-        this._objectRegistry,
-        unmarshalledArgs,
-        argTypes,
-      );
-      return this._sendMessageAndListenForResult(
-        createNewObjectMessage(
-          this._getProtocol(),
-          interfaceName,
-          this._generateRequestId(),
-          marshalledArgs,
-        ),
-        'promise',
-        `Creating instance of ${interfaceName}`,
-      );
-    })();
-    this._objectRegistry.addProxy(thisArg, interfaceName, idPromise);
-  }
-
-  /**
-   * Dispose a remote object. This makes it's proxies unsuable, and calls the `dispose` method on
+   * Dispose a remote object. This makes it's proxies unusable, and calls the `dispose` method on
    * the remote object.
    * @param object - The remote object.
    * @returns A Promise that resolves when the object disposal has completed.
    */
   async disposeRemoteObject(object: Object): Promise<void> {
-    const objectId = await this._objectRegistry.disposeProxy(object);
+    const objectId = this._objectRegistry.disposeProxy(object);
     if (objectId == null) {
       logger.info('Duplicate dispose call on remote proxy');
     } else if (this._transport.isClosed()) {
@@ -480,7 +446,6 @@ export class RpcConnection<TransportType: Transport> {
         // just queue up the message on the reliable transport; timeout errors
         // are solely intended to help clients behave nicer.
         const promise = new Promise((resolve, reject) => {
-          this._transport.send(JSON.stringify(message));
           this._calls.set(
             message.id,
             new Call(
@@ -493,6 +458,7 @@ export class RpcConnection<TransportType: Transport> {
               },
             ),
           );
+          this._transport.send(JSON.stringify(message));
         });
         const {trackSampleRate} = this._options;
         // flowlint-next-line sketchy-null-number:off
@@ -566,12 +532,6 @@ export class RpcConnection<TransportType: Transport> {
       );
     }
 
-    // Marshal the result, to send over the network.
-    invariant(returnVal != null);
-    returnVal = returnVal.then(value =>
-      this._getTypeRegistry().marshal(this._objectRegistry, value, type),
-    );
-
     // Send the result of the promise across the socket.
     returnVal.then(
       result => {
@@ -581,7 +541,7 @@ export class RpcConnection<TransportType: Transport> {
               this._getProtocol(),
               id,
               this._generateResponseId(),
-              result,
+              this.marshal(result, type),
             ),
           ),
         );
@@ -614,15 +574,10 @@ export class RpcConnection<TransportType: Transport> {
       result = returnVal;
     }
 
-    // Marshal the result, to send over the network.
+    // eslint-disable-next-line nuclide-internal/unused-subscription
     result
-      .concatMap(value =>
-        this._getTypeRegistry().marshal(
-          this._objectRegistry,
-          value,
-          elementType,
-        ),
-      )
+      // Marshal in a map() so that errors are caught below.
+      .map(data => this.marshal(data, elementType))
       // Send the next, error, and completion events of the observable across the socket.
       .subscribe(
         data => {
@@ -683,12 +638,11 @@ export class RpcConnection<TransportType: Transport> {
     }
   }
 
-  async _callFunction(id: number, call: CallMessage): Promise<void> {
+  _callFunction(id: number, call: CallMessage): void {
     const {getLocalImplementation, type} = this._getFunctionImplemention(
       call.method,
     );
-    const marshalledArgs = await this._getTypeRegistry().unmarshalArguments(
-      this._objectRegistry,
+    const marshalledArgs = this.unmarshalArguments(
       call.args,
       type.argumentTypes,
     );
@@ -700,7 +654,7 @@ export class RpcConnection<TransportType: Transport> {
     );
   }
 
-  async _callMethod(id: number, call: CallObjectMessage): Promise<void> {
+  _callMethod(id: number, call: CallObjectMessage): void {
     const object = this._objectRegistry.unmarshal(call.objectId);
     invariant(object != null);
 
@@ -708,8 +662,7 @@ export class RpcConnection<TransportType: Transport> {
     const {definition} = this._getClassDefinition(interfaceName);
     const type = definition.instanceMethods[call.method];
 
-    const marshalledArgs = await this._getTypeRegistry().unmarshalArguments(
-      this._objectRegistry,
+    const marshalledArgs = this.unmarshalArguments(
       call.args,
       type.argumentTypes,
     );
@@ -719,44 +672,6 @@ export class RpcConnection<TransportType: Transport> {
       object[call.method](...marshalledArgs),
       type.returnType,
     );
-  }
-
-  async _callConstructor(
-    id: number,
-    constructorMessage: NewObjectMessage,
-  ): Promise<void> {
-    const {getLocalImplementation, definition} = this._getClassDefinition(
-      constructorMessage.interface,
-    );
-    const {constructorArgs} = definition;
-    invariant(constructorArgs != null);
-    const marshalledArgs = await this._getTypeRegistry().unmarshalArguments(
-      this._objectRegistry,
-      constructorMessage.args,
-      constructorArgs,
-    );
-    const localImplementation = getLocalImplementation();
-    // Create a new object and put it in the registry.
-    const newObject = new localImplementation(...marshalledArgs);
-
-    // If we want to use client-assigned IDs in the future, we need to
-    // assign the ID to the object after construction.
-    // Attempting to marshal before construction is complete makes this impossible.
-    if (this._objectRegistry.isRegistered(newObject)) {
-      logger.error(
-        `Object of type ${
-          constructorMessage.interface
-        } was marshalled during the constructor.`,
-      );
-    }
-
-    // Return the object, which will automatically be converted to an id through the
-    // marshalling system.
-    this._returnPromise(id, Promise.resolve(newObject), {
-      kind: 'named',
-      name: constructorMessage.interface,
-      location: builtinLocation,
-    });
   }
 
   getTransport(): TransportType {
@@ -804,7 +719,6 @@ export class RpcConnection<TransportType: Transport> {
         break;
       case 'call':
       case 'call-object':
-      case 'new':
       case 'dispose':
       case 'unsubscribe':
         this._handleRequestMessage(message);
@@ -912,7 +826,7 @@ export class RpcConnection<TransportType: Transport> {
     }
   }
 
-  async _handleRequestMessage(message: RequestMessage): Promise<void> {
+  _handleRequestMessage(message: RequestMessage): void {
     const id = message.id;
 
     if (
@@ -945,17 +859,17 @@ export class RpcConnection<TransportType: Transport> {
     try {
       switch (message.type) {
         case 'call':
-          await this._callFunction(id, message);
+          this._callFunction(id, message);
           break;
         case 'call-object':
-          await this._callMethod(id, message);
-          break;
-        case 'new':
-          await this._callConstructor(id, message);
+          this._callMethod(id, message);
           break;
         case 'dispose':
-          await this._objectRegistry.disposeObject(message.objectId);
-          this._returnPromise(id, Promise.resolve(), voidType);
+          this._returnPromise(
+            id,
+            this._objectRegistry.disposeObject(message.objectId),
+            voidType,
+          );
           break;
         case 'unsubscribe':
           this._objectRegistry.disposeSubscription(id);
@@ -1023,7 +937,7 @@ export class RpcConnection<TransportType: Transport> {
       call.reject(new Error('Connection Closed'));
     });
     this._subscriptions.forEach(subscription => {
-      subscription.error(new Error('Connection Closed'));
+      subscription.complete();
     });
     this._subscriptions.clear();
   }
@@ -1039,8 +953,6 @@ function trackingIdOfMessage(
     case 'call-object':
       const callInterface = registry.getInterface(message.objectId);
       return `service-framework:${callInterface}.${message.method}`;
-    case 'new':
-      return `service-framework:new:${message.interface}`;
     case 'dispose':
       const interfaceName = registry.getInterface(message.objectId);
       return `service-framework:dispose:${interfaceName}`;

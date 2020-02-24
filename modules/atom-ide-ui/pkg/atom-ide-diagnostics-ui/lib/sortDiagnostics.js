@@ -6,7 +6,7 @@
  * LICENSE file in the root directory of this source tree. An additional grant
  * of patent rights can be found in the PATENTS file in the same directory.
  *
- * @flow
+ * @flow strict-local
  * @format
  */
 
@@ -15,7 +15,7 @@ import type {
   DiagnosticMessageKind,
   DiagnosticMessageType,
 } from '../../atom-ide-diagnostics/lib/types';
-import type {DisplayDiagnostic} from './ui/DiagnosticsTable';
+import type {DisplayDiagnostic} from './types';
 
 import invariant from 'assert';
 

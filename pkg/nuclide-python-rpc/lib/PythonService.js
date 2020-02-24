@@ -5,12 +5,15 @@
  * This source code is licensed under the license found in the LICENSE file in
  * the root directory of this source tree.
  *
- * @flow
+ * @flow strict-local
  * @format
  */
 
 import type {NuclideUri} from 'nuclide-commons/nuclideUri';
-import type {LanguageService} from '../../nuclide-language-service/lib/LanguageService';
+import type {
+  LanguageService,
+  Completion,
+} from '../../nuclide-language-service/lib/LanguageService';
 import type {FileNotifier} from '../../nuclide-open-files-rpc/lib/rpc-types';
 import type {TextEdit} from 'nuclide-commons-atom/text-edit';
 import type {TypeHint} from '../../nuclide-type-hint/lib/rpc-types';
@@ -19,26 +22,31 @@ import type {
   DefinitionQueryResult,
   DiagnosticMessageType,
   FindReferencesReturn,
+  RenameReturn,
   Outline,
   CodeAction,
+  SignatureHelp,
 } from 'atom-ide-ui';
 import type {
   AutocompleteResult,
   FileDiagnosticMap,
   FileDiagnosticMessage,
 } from '../../nuclide-language-service/lib/LanguageService';
-import type {NuclideEvaluationExpression} from 'nuclide-debugger-common';
 import type {ConnectableObservable} from 'rxjs';
 
 import invariant from 'assert';
 import {Observable} from 'rxjs';
-import {runCommand, ProcessExitError} from 'nuclide-commons/process';
+import {
+  runCommand,
+  ProcessExitError,
+  getOriginalEnvironment,
+} from 'nuclide-commons/process';
 import {asyncSome} from 'nuclide-commons/promise';
 import {wordAtPositionFromBuffer} from 'nuclide-commons/range';
 import {maybeToString} from 'nuclide-commons/string';
 import fsPromise from 'nuclide-commons/fsPromise';
 import nuclideUri from 'nuclide-commons/nuclideUri';
-import once from '../../commons-node/once';
+import once from 'nuclide-commons/once';
 import {IDENTIFIER_REGEXP} from './constants';
 import JediServerManager from './JediServerManager';
 import {parseFlake8Output} from './flake8';
@@ -189,6 +197,10 @@ class PythonSingleFileLanguageService {
     );
   }
 
+  resolveAutocompleteSuggestion(suggestion: Completion): Promise<?Completion> {
+    return Promise.resolve(null);
+  }
+
   getDefinition(
     filePath: NuclideUri,
     buffer: simpleTextBuffer$TextBuffer,
@@ -252,6 +264,15 @@ class PythonSingleFileLanguageService {
     };
   }
 
+  rename(
+    filePath: NuclideUri,
+    buffer: simpleTextBuffer$TextBuffer,
+    position: atom$Point,
+    newName: string,
+  ): Observable<?RenameReturn> {
+    throw new Error('Not Yet Implemented');
+  }
+
   getCoverage(filePath: NuclideUri): Promise<?CoverageResult> {
     throw new Error('Not Yet Implemented');
   }
@@ -305,6 +326,10 @@ class PythonSingleFileLanguageService {
     };
   }
 
+  async onToggleCoverage(set: boolean): Promise<void> {
+    return;
+  }
+
   highlight(
     filePath: NuclideUri,
     buffer: simpleTextBuffer$TextBuffer,
@@ -338,6 +363,7 @@ class PythonSingleFileLanguageService {
       stdout = await runCommand(command, args, {
         cwd: dirName,
         input: contents,
+        env: await getOriginalEnvironment(),
         // At the moment, yapf outputs 3 possible exit codes:
         // 0 - success, no content change.
         // 2 - success, contents changed.
@@ -367,12 +393,19 @@ class PythonSingleFileLanguageService {
     throw new Error('Not Yet Implemented');
   }
 
-  getEvaluationExpression(
+  async signatureHelp(
     filePath: NuclideUri,
     buffer: simpleTextBuffer$TextBuffer,
     position: atom$Point,
-  ): Promise<?NuclideEvaluationExpression> {
-    throw new Error('Not Yet Implemented');
+  ): Promise<?SignatureHelp> {
+    const service = await serverManager.getJediService();
+    return service.get_signature_help(
+      filePath,
+      buffer.getText(),
+      serverManager.getSysPath(filePath),
+      position.row,
+      position.column,
+    );
   }
 
   getProjectRoot(fileUri: NuclideUri): Promise<?NuclideUri> {
@@ -438,7 +471,6 @@ let shouldRunFlake8 = true;
 
 export async function getDiagnostics(
   src: NuclideUri,
-  contents: string,
 ): Promise<Array<PythonDiagnostic>> {
   if (!shouldRunFlake8) {
     return [];
@@ -446,7 +478,7 @@ export async function getDiagnostics(
 
   let result;
   try {
-    result = await runLinterCommand(src, contents);
+    result = await runLinterCommand(src);
   } catch (err) {
     // A non-successful exit code can result in some cases that we want to ignore,
     // for example when an incorrect python version is specified for a source file.
@@ -464,14 +496,8 @@ export async function getDiagnostics(
   return parseFlake8Output(src, result);
 }
 
-async function runLinterCommand(
-  src: NuclideUri,
-  contents: string,
-): Promise<string> {
+async function runLinterCommand(src: NuclideUri): Promise<string> {
   const dirName = nuclideUri.dirname(src);
-  const configDir = await fsPromise.findNearestFile('.flake8', dirName);
-  // flowlint-next-line sketchy-null-string:off
-  const configPath = configDir ? nuclideUri.join(configDir, '.flake8') : null;
 
   let result;
   let runFlake8;
@@ -483,7 +509,7 @@ async function runLinterCommand(
   }
 
   if (runFlake8 != null) {
-    result = await runFlake8(src, contents, configPath);
+    result = await runFlake8(src);
     if (result != null) {
       return result;
     }
@@ -492,20 +518,11 @@ async function runLinterCommand(
   const command =
     (global.atom && atom.config.get('nuclide.nuclide-python.pathToFlake8')) ||
     'flake8';
-  const args = [];
 
-  // flowlint-next-line sketchy-null-string:off
-  if (configPath) {
-    args.push('--config');
-    args.push(configPath);
-  }
-
-  // Read contents from stdin.
-  args.push('-');
   invariant(typeof command === 'string');
-  return runCommand(command, args, {
+  return runCommand(command, [src], {
     cwd: dirName,
-    input: contents,
+    env: await getOriginalEnvironment(),
     // 1 indicates unclean lint result (i.e. has errors/warnings).
     isExitError: exit => exit.exitCode == null || exit.exitCode > 1,
   }).toPromise();

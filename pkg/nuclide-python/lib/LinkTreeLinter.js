@@ -11,7 +11,7 @@
 
 import type {LinterMessageV2} from 'atom-ide-ui';
 import type {BuckTaskRunnerService} from '../../nuclide-buck/lib/types';
-import type {CwdApi} from '../../nuclide-current-working-directory/lib/CwdApi';
+import type CwdApi from '../../nuclide-current-working-directory/lib/CwdApi';
 
 import {getLogger} from 'log4js';
 import {observeActiveEditorsDebounced} from 'nuclide-commons-atom/debounced';
@@ -21,7 +21,7 @@ import {compact} from 'nuclide-commons/observable';
 import UniversalDisposable from 'nuclide-commons/UniversalDisposable';
 import {Observable, Subject} from 'rxjs';
 import shallowEqual from 'shallowequal';
-import {track} from '../../nuclide-analytics';
+import {track} from 'nuclide-analytics';
 import {getPythonServiceByNuclideUri} from '../../nuclide-remote-connection';
 import {GRAMMAR_SET} from './constants';
 
@@ -64,7 +64,7 @@ export default class LinkTreeLinter {
         }
         // If the CWD doesn't contain the file, Buck isn't going to work.
         const cwd = this._cwdApi == null ? null : this._cwdApi.getCwd();
-        if (cwd != null && !nuclideUri.contains(cwd.getPath(), path)) {
+        if (cwd != null && !nuclideUri.contains(cwd, path)) {
           return Observable.of([]);
         }
         const pythonService = getPythonServiceByNuclideUri(path);

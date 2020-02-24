@@ -16,13 +16,17 @@ import type {
   DiagnosticProviderUpdate,
   DiagnosticUpdateCallback,
 } from 'atom-ide-ui';
-import type {FileDiagnosticMap, LanguageService} from './LanguageService';
+import type {
+  FileDiagnosticMap,
+  LanguageService,
+  FileDiagnosticProviderUpdate,
+} from './LanguageService';
 import type {BusySignalProvider} from './AtomLanguageService';
 
 import {Cache} from 'nuclide-commons/cache';
 import {ConnectionCache} from '../../nuclide-remote-connection';
 import nuclideUri from 'nuclide-commons/nuclideUri';
-import {track, trackTiming} from '../../nuclide-analytics';
+import {trackTiming} from 'nuclide-analytics';
 import {RequestSerializer} from 'nuclide-commons/promise';
 import {DiagnosticsProviderBase} from './DiagnosticsProviderBase';
 import {onDidRemoveProjectPath} from 'nuclide-commons-atom/projects';
@@ -30,7 +34,6 @@ import {getFileVersionOfEditor} from '../../nuclide-open-files';
 import {Observable} from 'rxjs';
 import {ServerConnection} from '../../nuclide-remote-connection';
 import {observableFromSubscribeFunction} from 'nuclide-commons/event';
-import {observeTextEditors} from 'nuclide-commons-atom/text-editor';
 import UniversalDisposable from 'nuclide-commons/UniversalDisposable';
 import {ensureInvalidations} from '../../nuclide-language-service-rpc';
 
@@ -226,10 +229,7 @@ export class FileDiagnosticsProvider<T: LanguageService> {
     // Once we provide all diagnostics, instead of just the current file, we can
     // probably remove the activeTextEditor parameter.
     const activeTextEditor = atom.workspace.getActiveTextEditor();
-    if (
-      activeTextEditor &&
-      !nuclideUri.isBrokenDeserializedUri(activeTextEditor.getPath())
-    ) {
+    if (activeTextEditor) {
       if (
         this._providerBase
           .getGrammarScopes()
@@ -297,7 +297,7 @@ export class FileDiagnosticsProvider<T: LanguageService> {
 }
 
 export class ObservableDiagnosticProvider<T: LanguageService> {
-  updates: Observable<DiagnosticProviderUpdate>;
+  updates: Observable<FileDiagnosticProviderUpdate>;
   invalidations: Observable<DiagnosticInvalidationMessage>;
   _analyticsEventName: string;
   _grammarScopes: Set<string>;
@@ -329,7 +329,8 @@ export class ObservableDiagnosticProvider<T: LanguageService> {
         return Observable.fromPromise(languageService)
           .catch(error => {
             this._logger.error(
-              `Error: languageService, ${this._analyticsEventName} ${error}`,
+              `Error: languageService, ${this._analyticsEventName}`,
+              error,
             );
             return Observable.empty();
           })
@@ -354,7 +355,6 @@ export class ObservableDiagnosticProvider<T: LanguageService> {
             );
           })
           .map((updates: FileDiagnosticMap) => {
-            track(this._analyticsEventName);
             const filePathToMessages = new Map();
             updates.forEach((messages, filePath) => {
               const fileCache = this._connectionToFiles.get(connection);
@@ -403,7 +403,7 @@ export class ObservableDiagnosticProvider<T: LanguageService> {
     // a file belonging to the connection is open.
     // Monitor open text editors and trigger a connection for each one, if needed.
     this._subscriptions = new UniversalDisposable(
-      observeTextEditors(editor => {
+      atom.workspace.observeTextEditors(editor => {
         const path = editor.getPath();
         if (
           path != null &&

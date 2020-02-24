@@ -12,20 +12,23 @@
 
 /* eslint-env browser */
 
+import type {IExpression} from '../../../..';
 import type {
   ConsolePersistedState,
-  DisplayableRecord,
-  OutputProviderStatus,
+  ConsoleSourceStatus,
   Record,
   Source,
   Store,
   SourceInfo,
+  Severity,
+  Level,
+  AppState,
 } from '../types';
 import type {CreatePasteFunction} from '../types';
 import type {RegExpFilterChange} from 'nuclide-commons-ui/RegExpFilter';
-import type {Executor} from '../types';
 
 import observePaneItemVisibility from 'nuclide-commons-atom/observePaneItemVisibility';
+import {setDifference, areSetsEqual} from 'nuclide-commons/collection';
 import Model from 'nuclide-commons/Model';
 import shallowEqual from 'shallowequal';
 import {bindObservableAsProps} from 'nuclide-commons-ui/bindObservableAsProps';
@@ -34,29 +37,31 @@ import memoizeUntilChanged from 'nuclide-commons/memoizeUntilChanged';
 import {toggle} from 'nuclide-commons/observable';
 import UniversalDisposable from 'nuclide-commons/UniversalDisposable';
 import {nextAnimationFrame} from 'nuclide-commons/observable';
+import observableFromReduxStore from 'nuclide-commons/observableFromReduxStore';
 import {getFilterPattern} from 'nuclide-commons-ui/RegExpFilter';
-import getCurrentExecutorId from '../getCurrentExecutorId';
 import * as Actions from '../redux/Actions';
+import * as Selectors from '../redux/Selectors';
 import ConsoleView from './ConsoleView';
 import {List} from 'immutable';
 import * as React from 'react';
 import {Observable, ReplaySubject} from 'rxjs';
 
-type Options = {
+type Options = {|
   store: Store,
   initialFilterText?: string,
   initialEnableRegExpFilter?: boolean,
   initialUnselectedSourceIds?: Array<string>,
-};
+  initialUnselectedSeverities?: Set<Severity>,
+|};
 
 //
 // State unique to this particular Console instance
 //
 type State = {
-  displayableRecords: Array<DisplayableRecord>,
   filterText: string,
   enableRegExpFilter: boolean,
   unselectedSourceIds: Array<string>,
+  selectedSeverities: Set<Severity>,
 };
 
 type BoundActionCreators = {
@@ -71,7 +76,8 @@ export const WORKSPACE_VIEW_URI = 'atom://nuclide/console';
 
 const ERROR_TRANSCRIBING_MESSAGE =
   "// Nuclide couldn't find the right text to display";
-const INITIAL_RECORD_HEIGHT = 21;
+
+const ALL_SEVERITIES = new Set(['error', 'warning', 'info']);
 
 /**
  * An Atom "view model" for the console. This object is responsible for creating a stateful view
@@ -81,10 +87,6 @@ const INITIAL_RECORD_HEIGHT = 21;
 export class Console {
   _actionCreators: BoundActionCreators;
 
-  // Associates Records with their display state (height, expansionStateId).
-  _displayableRecords: WeakMap<Record, DisplayableRecord>;
-
-  _nextRecordId: number;
   _titleChanges: Observable<string>;
   _model: Model<State>;
   _store: Store;
@@ -97,6 +99,7 @@ export class Console {
       initialFilterText,
       initialEnableRegExpFilter,
       initialUnselectedSourceIds,
+      initialUnselectedSeverities,
     } = options;
     this._model = new Model({
       displayableRecords: [],
@@ -104,17 +107,18 @@ export class Console {
       enableRegExpFilter: Boolean(initialEnableRegExpFilter),
       unselectedSourceIds:
         initialUnselectedSourceIds == null ? [] : initialUnselectedSourceIds,
+      selectedSeverities:
+        initialUnselectedSeverities == null
+          ? ALL_SEVERITIES
+          : setDifference(ALL_SEVERITIES, initialUnselectedSeverities),
     });
 
     this._store = store;
-    this._nextRecordId = 0;
-    this._displayableRecords = new WeakMap();
     this._destroyed = new ReplaySubject(1);
 
     this._titleChanges = Observable.combineLatest(
       this._model.toObservable(),
-      // $FlowIssue: Flow doesn't know about Symbol.observable
-      Observable.from(store),
+      observableFromReduxStore(store),
     )
       .takeUntil(this._destroyed)
       .map(() => this.getTitle())
@@ -123,7 +127,7 @@ export class Console {
   }
 
   getIconName(): string {
-    return 'terminal';
+    return 'nuclicon-console';
   }
 
   // Get the pane item's title. If there's only one source selected, we'll use that to make a more
@@ -166,8 +170,18 @@ export class Console {
   }
 
   _getSources(): Array<Source> {
-    const {providers, providerStatuses, records} = this._store.getState();
-    return this._getSourcesMemoized({providers, providerStatuses, records});
+    const {
+      providers,
+      providerStatuses,
+      records,
+      incompleteRecords,
+    } = this._store.getState();
+    return this._getSourcesMemoized({
+      providers,
+      providerStatuses,
+      records,
+      incompleteRecords,
+    });
   }
 
   // Memoize `getSources()`. Unfortunately, since we look for unrepresented sources in the record
@@ -175,6 +189,7 @@ export class Console {
   // TODO: Consider removing records when their source is removed. This will likely require adding
   // the ability to enable and disable sources so, for example, when the debugger is no longer
   // active, it still remains in the source list.
+  // $FlowFixMe (>=0.85.0) (T35986896) Flow upgrade suppress
   _getSourcesMemoized = memoizeUntilChanged(
     getSources,
     opts => opts,
@@ -191,6 +206,10 @@ export class Console {
       initialFilterText: this._model.state.filterText,
       initialEnableRegExpFilter: this._model.state.enableRegExpFilter,
       initialUnselectedSourceIds: this._model.state.unselectedSourceIds,
+      initialUnselectedSeverities: setDifference(
+        ALL_SEVERITIES,
+        this._model.state.selectedSeverities,
+      ),
     });
   }
 
@@ -217,7 +236,9 @@ export class Console {
   };
 
   _createPaste = async (): Promise<void> => {
-    const displayableRecords = this._getDisplayableRecords();
+    const displayableRecords = Selectors.getAllRecords(
+      this._store.getState(),
+    ).toArray();
     const createPasteImpl = this._store.getState().createPasteFunction;
     if (createPasteImpl == null) {
       return;
@@ -228,7 +249,8 @@ export class Console {
   _getFilterInfo(): {
     invalid: boolean,
     selectedSourceIds: Array<string>,
-    filteredRecords: Array<DisplayableRecord>,
+    filteredRecords: Array<Record>,
+    selectedSeverities: Set<Severity>,
   } {
     const {pattern, invalid} = getFilterPattern(
       this._model.state.filterText,
@@ -242,9 +264,11 @@ export class Console {
           this._model.state.unselectedSourceIds.indexOf(sourceId) === -1,
       );
 
+    const {selectedSeverities} = this._model.state;
     const filteredRecords = filterRecords(
-      this._getDisplayableRecords(),
+      Selectors.getAllRecords(this._store.getState()).toArray(),
       selectedSourceIds,
+      selectedSeverities,
       pattern,
       sources.length !== selectedSourceIds.length,
     );
@@ -252,6 +276,7 @@ export class Console {
     return {
       invalid,
       selectedSourceIds,
+      selectedSeverities,
       filteredRecords,
     };
   }
@@ -262,10 +287,13 @@ export class Console {
     }
 
     const actionCreators = this._getBoundActionCreators();
+    const globalStates: Observable<AppState> = observableFromReduxStore(
+      this._store,
+    );
+
     const props = Observable.combineLatest(
       this._model.toObservable(),
-      // $FlowIssue: Flow doesn't know about Symbol.observable
-      Observable.from(this._store),
+      globalStates,
     )
       // Don't re-render when the console isn't visible.
       .let(toggle(observePaneItemVisibility(this)))
@@ -274,10 +302,11 @@ export class Console {
         const {
           invalid,
           selectedSourceIds,
+          selectedSeverities,
           filteredRecords,
         } = this._getFilterInfo();
 
-        const currentExecutorId = getCurrentExecutorId(globalState);
+        const currentExecutorId = Selectors.getCurrentExecutorId(globalState);
         const currentExecutor =
           currentExecutorId != null
             ? globalState.executors.get(currentExecutorId)
@@ -295,9 +324,9 @@ export class Console {
           unselectedSourceIds: localState.unselectedSourceIds,
           filterText: localState.filterText,
           enableRegExpFilter: localState.enableRegExpFilter,
-          displayableRecords: filteredRecords,
+          records: filteredRecords,
           filteredRecordCount:
-            globalState.records.size - filteredRecords.length,
+            Selectors.getAllRecords(globalState).size - filteredRecords.length,
           history: globalState.history,
           sources: this._getSources(),
           selectedSourceIds,
@@ -305,10 +334,10 @@ export class Console {
           executors: globalState.executors,
           getProvider: id => globalState.providers.get(id),
           updateFilter: this._updateFilter,
-          onDisplayableRecordHeightChange: this
-            ._handleDisplayableRecordHeightChange,
           resetAllFilters: this._resetAllFilters,
           fontSize: globalState.fontSize,
+          selectedSeverities,
+          toggleSeverity: this._toggleSeverity,
         };
       });
 
@@ -321,12 +350,16 @@ export class Console {
       filterText,
       enableRegExpFilter,
       unselectedSourceIds,
+      selectedSeverities,
     } = this._model.state;
     return {
       deserializer: 'nuclide.Console',
       filterText,
       enableRegExpFilter,
       unselectedSourceIds,
+      unselectedSeverities: [
+        ...setDifference(ALL_SEVERITIES, selectedSeverities),
+      ],
     };
   }
 
@@ -338,6 +371,16 @@ export class Console {
     this._model.setState({unselectedSourceIds});
   };
 
+  /** Unselects the sources from the given IDs */
+  unselectSources(ids: Array<string>): void {
+    const newIds = ids.filter(
+      id => !this._model.state.unselectedSourceIds.includes(id),
+    );
+    this._model.setState({
+      unselectedSourceIds: this._model.state.unselectedSourceIds.concat(newIds),
+    });
+  }
+
   _updateFilter = (change: RegExpFilterChange): void => {
     const {text, isRegExp} = change;
     this._model.setState({
@@ -346,64 +389,22 @@ export class Console {
     });
   };
 
-  _handleDisplayableRecordHeightChange = (
-    recordId: number,
-    newHeight: number,
-    callback: () => void,
-  ): void => {
-    const {records} = this._store.getState();
-    const nextDisplayableRecords = Array(records.size);
-    records.forEach((record, i) => {
-      let displayableRecord = this._toDisplayableRecord(record);
-      if (displayableRecord.id === recordId) {
-        // Update the record with the new height.
-        displayableRecord = {
-          ...displayableRecord,
-          height: newHeight,
-        };
-        this._displayableRecords.set(record, displayableRecord);
-      }
-      nextDisplayableRecords[i] = displayableRecord;
-    });
-
-    this._model.setState({displayableRecords: nextDisplayableRecords});
-    requestAnimationFrame(callback);
-  };
-
-  _getDisplayableRecords(): Array<DisplayableRecord> {
-    const {records} = this._store.getState();
-    const displayableRecords = Array(records.size);
-    records.forEach((record, i) => {
-      displayableRecords[i] = this._toDisplayableRecord(record);
-    });
-    return displayableRecords;
-  }
-
-  /**
-   * Transforms the Records from the store into DisplayableRecords. This caches the result
-   * per-Console instance because the same record can have different heights in different
-   * containers.
-   */
-  _toDisplayableRecord(record: Record): DisplayableRecord {
-    const displayableRecord = this._displayableRecords.get(record);
-    if (displayableRecord != null) {
-      return displayableRecord;
+  _toggleSeverity = (severity: Severity): void => {
+    const {selectedSeverities} = this._model.state;
+    const nextSelectedSeverities = new Set(selectedSeverities);
+    if (nextSelectedSeverities.has(severity)) {
+      nextSelectedSeverities.delete(severity);
+    } else {
+      nextSelectedSeverities.add(severity);
     }
-    const newDisplayableRecord = {
-      id: this._nextRecordId++,
-      record,
-      height: INITIAL_RECORD_HEIGHT,
-      expansionStateId: {},
-    };
-    this._displayableRecords.set(record, newDisplayableRecord);
-    return newDisplayableRecord;
-  }
+    this._model.setState({selectedSeverities: nextSelectedSeverities});
+  };
 }
 
 function getSources(options: {
   records: List<Record>,
   providers: Map<string, SourceInfo>,
-  providerStatuses: Map<string, OutputProviderStatus>,
+  providerStatuses: Map<string, ConsoleSourceStatus>,
 }): Array<Source> {
   const {providers, providerStatuses, records} = options;
 
@@ -412,7 +413,7 @@ function getSources(options: {
     Array.from(providers.entries()).map(([k, provider]) => {
       const source = {
         id: provider.id,
-        name: provider.id,
+        name: provider.name,
         status: providerStatuses.get(provider.id) || 'stopped',
         start:
           typeof provider.start === 'function' ? provider.start : undefined,
@@ -440,19 +441,28 @@ function getSources(options: {
 }
 
 function filterRecords(
-  displayableRecords: Array<DisplayableRecord>,
+  records: Array<Record>,
   selectedSourceIds: Array<string>,
+  selectedSeverities: Set<Severity>,
   filterPattern: ?RegExp,
   filterSources: boolean,
-): Array<DisplayableRecord> {
-  if (!filterSources && filterPattern == null) {
-    return displayableRecords;
+): Array<Record> {
+  if (
+    !filterSources &&
+    filterPattern == null &&
+    areSetsEqual(ALL_SEVERITIES, selectedSeverities)
+  ) {
+    return records;
   }
 
-  return displayableRecords.filter(({record}) => {
+  return records.filter(record => {
     // Only filter regular messages
     if (record.kind !== 'message') {
       return true;
+    }
+
+    if (!selectedSeverities.has(levelToSeverity(record.level))) {
+      return false;
     }
 
     const sourceMatches = selectedSourceIds.indexOf(record.sourceId) !== -1;
@@ -464,35 +474,25 @@ function filterRecords(
 }
 
 async function serializeRecordObject(
-  executor: Executor,
   visited: Set<string>,
-  data: {
-    objectId?: string,
-    description?: string,
-    value?: string,
-  },
+  expression: IExpression,
   text: string,
   level: number,
 ): Promise<string> {
-  const getText = record => {
+  const getText = exp => {
     let indent = '';
     for (let i = 0; i < level; i++) {
       indent += '\t';
     }
-    return (
-      indent +
-      (record.description != null
-        ? record.description
-        : record.value != null ? record.value : '')
-    );
+    return indent + exp.getValue();
   };
 
-  if (data.objectId == null) {
+  if (!expression.hasChildren()) {
     // Leaf node.
-    return text + getText(data);
+    return text + getText(expression);
   }
 
-  const id = data.objectId;
+  const id = expression.getId();
   if (visited.has(id)) {
     // Guard against cycles.
     return text;
@@ -500,62 +500,44 @@ async function serializeRecordObject(
 
   visited.add(id);
 
-  if (executor.getProperties == null) {
-    return text;
-  }
-
-  const childProperties = (await executor.getProperties(id).toPromise()) || [];
-  const serializedProps = childProperties.map(childProp => {
-    return serializeRecordObject(
-      executor,
-      visited,
-      childProp.value,
-      '',
-      level + 1,
-    );
+  const children = await expression.getChildren();
+  const serializedProps = children.map(childProp => {
+    return serializeRecordObject(visited, childProp, '', level + 1);
   });
-  return getText(data) + '\n' + (await Promise.all(serializedProps)).join('\n');
+  return (
+    getText(expression) + '\n' + (await Promise.all(serializedProps)).join('\n')
+  );
 }
 
 async function createPaste(
   createPasteImpl: CreatePasteFunction,
-  records: Array<DisplayableRecord>,
+  records: Array<Record>,
 ): Promise<void> {
   const linePromises = records
     .filter(
-      displayable =>
-        displayable.record.kind === 'message' ||
-        displayable.record.kind === 'request' ||
-        displayable.record.kind === 'response',
+      record =>
+        record.kind === 'message' ||
+        record.kind === 'request' ||
+        record.kind === 'response',
     )
-    .map(async displayable => {
-      const record = displayable.record;
+    .map(async record => {
       const level =
         record.level != null ? record.level.toString().toUpperCase() : 'LOG';
       const timestamp = record.timestamp.toLocaleString();
-      let text =
-        record.text ||
-        (record.data && record.data.value) ||
-        ERROR_TRANSCRIBING_MESSAGE;
+      let text = record.text || ERROR_TRANSCRIBING_MESSAGE;
 
       if (
         record.kind === 'response' &&
-        record.data != null &&
-        record.data.objectId != null &&
-        record.data.objectId !== ''
+        record.expressions != null &&
+        record.expressions.length > 0
       ) {
-        const executor = record.executor;
-        if (executor != null) {
+        text = '';
+        for (const expression of record.expressions) {
           // If the record has a data object, and the object has an ID,
           // recursively expand the nodes of the object and serialize it
           // for the paste.
-          text = await serializeRecordObject(
-            executor,
-            new Set(),
-            record.data,
-            '',
-            0,
-          );
+          // eslint-disable-next-line no-await-in-loop
+          text += await serializeRecordObject(new Set(), expression, '', 0);
         }
       }
 
@@ -599,5 +581,22 @@ async function createPaste(
       detail: errorMessages.join('\n'),
       dismissable: true,
     });
+  }
+}
+
+function levelToSeverity(level: Level): Severity {
+  switch (level) {
+    case 'error':
+      return 'error';
+    case 'warning':
+      return 'warning';
+    case 'log':
+    case 'info':
+    case 'debug':
+    case 'success':
+      return 'info';
+    default:
+      // All the colors are "info"
+      return 'info';
   }
 }

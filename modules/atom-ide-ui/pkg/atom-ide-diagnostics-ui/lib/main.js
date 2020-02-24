@@ -10,44 +10,44 @@
  * @format
  */
 
+import type {GatekeeperService} from 'nuclide-commons-atom/types';
+import type {NuclideUri} from 'nuclide-commons/nuclideUri';
+
+import type {GlobalViewState} from './types';
 import type {
   DatatipProvider,
   DatatipService,
 } from '../../atom-ide-datatip/lib/types';
-
 import type {
   DiagnosticMessage,
-  DiagnosticMessages,
   DiagnosticUpdater,
+  ObservableDiagnosticProvider,
 } from '../../atom-ide-diagnostics/lib/types';
-import type {NuclideUri} from 'nuclide-commons/nuclideUri';
-import type {GlobalViewState} from './types';
 
-import invariant from 'assert';
-
-import analytics from 'nuclide-commons-atom/analytics';
-
-import idx from 'idx';
 import {areSetsEqual} from 'nuclide-commons/collection';
-import nuclideUri from 'nuclide-commons/nuclideUri';
-import {fastDebounce} from 'nuclide-commons/observable';
+import {diffSets} from 'nuclide-commons/observable';
+import {observableFromSubscribeFunction} from 'nuclide-commons/event';
+import analytics from 'nuclide-commons/analytics';
+import createPackage from 'nuclide-commons-atom/createPackage';
+import idx from 'idx';
+import invariant from 'assert';
 import KeyboardShortcuts from './KeyboardShortcuts';
 import Model from 'nuclide-commons/Model';
-import createPackage from 'nuclide-commons-atom/createPackage';
-import {observeTextEditors} from 'nuclide-commons-atom/text-editor';
+import nuclideUri from 'nuclide-commons/nuclideUri';
 import UniversalDisposable from 'nuclide-commons/UniversalDisposable';
-import {observableFromSubscribeFunction} from 'nuclide-commons/event';
-import {DiagnosticsViewModel, WORKSPACE_VIEW_URI} from './DiagnosticsViewModel';
-import StatusBarTile from './ui/StatusBarTile';
+
 import {applyUpdateToEditor} from './gutter';
-import getDiagnosticDatatip from './getDiagnosticDatatip';
-import {goToLocation} from 'nuclide-commons-atom/go-to-location';
-import featureConfig from 'nuclide-commons-atom/feature-config';
 import {destroyItemWhere} from 'nuclide-commons-atom/destroyItemWhere';
+import {DiagnosticsViewModel, WORKSPACE_VIEW_URI} from './DiagnosticsViewModel';
+import {goToLocation} from 'nuclide-commons-atom/go-to-location';
 import {isValidTextEditor} from 'nuclide-commons-atom/text-editor';
-import {Observable} from 'rxjs';
+import {Observable, BehaviorSubject} from 'rxjs';
+import featureConfig from 'nuclide-commons-atom/feature-config';
+import getDiagnosticDatatip from './getDiagnosticDatatip';
 import showActionsMenu from './showActionsMenu';
 import showAtomLinterWarning from './showAtomLinterWarning';
+import StatusBarTile from './ui/StatusBarTile';
+import ReactDOM from 'react-dom';
 
 const MAX_OPEN_ALL_FILES = 20;
 const SHOW_TRACES_SETTING = 'atom-ide-diagnostics-ui.showDiagnosticTraces';
@@ -56,9 +56,14 @@ type ActivationState = {|
   filterByActiveTextEditor: boolean,
 |};
 
-type DiagnosticsState = {|
+export type DiagnosticsState = {|
   ...ActivationState,
+  ...OpenBlockDecorationState,
   diagnosticUpdater: ?DiagnosticUpdater,
+|};
+
+type OpenBlockDecorationState = {|
+  openedMessageIds: Set<string>,
 |};
 
 class Activation {
@@ -67,18 +72,20 @@ class Activation {
   _statusBarTile: ?StatusBarTile;
   _fileDiagnostics: WeakMap<atom$TextEditor, Array<DiagnosticMessage>>;
   _globalViewStates: ?Observable<GlobalViewState>;
+  _gatekeeperServices: BehaviorSubject<?GatekeeperService> = new BehaviorSubject();
 
   constructor(state: ?Object): void {
+    this._model = new Model({
+      filterByActiveTextEditor:
+        idx(state, _ => _.filterByActiveTextEditor) === true,
+      diagnosticUpdater: null,
+      openedMessageIds: new Set(),
+    });
     this._subscriptions = new UniversalDisposable(
       this.registerOpenerAndCommand(),
       this._registerActionsMenu(),
       showAtomLinterWarning(),
     );
-    this._model = new Model({
-      filterByActiveTextEditor:
-        idx(state, _ => _.filterByActiveTextEditor) === true,
-      diagnosticUpdater: null,
-    });
     this._fileDiagnostics = new WeakMap();
   }
 
@@ -112,8 +119,10 @@ class Activation {
 
   consumeDiagnosticUpdates(diagnosticUpdater: DiagnosticUpdater): IDisposable {
     this._getStatusBarTile().consumeDiagnosticUpdates(diagnosticUpdater);
-    this._subscriptions.add(gutterConsumeDiagnosticUpdates(diagnosticUpdater));
 
+    this._subscriptions.add(
+      this._gutterConsumeDiagnosticUpdates(diagnosticUpdater),
+    );
     // Currently, the DiagnosticsView is designed to work with only one DiagnosticUpdater.
     if (this._model.state.diagnosticUpdater != null) {
       return new UniversalDisposable();
@@ -122,8 +131,11 @@ class Activation {
     const atomCommandsDisposable = addAtomCommands(diagnosticUpdater);
     this._subscriptions.add(atomCommandsDisposable);
     this._subscriptions.add(
+      this._observeDiagnosticsAndCleanUpOpenedMessageIds(),
+    );
+    this._subscriptions.add(
       // Track diagnostics for all active editors.
-      observeTextEditors((editor: TextEditor) => {
+      atom.workspace.observeTextEditors((editor: TextEditor) => {
         this._fileDiagnostics.set(editor, []);
         // TODO: this is actually inefficient - this filters all file events
         // by their path, so this is actually O(N^2) in the number of editors.
@@ -136,8 +148,8 @@ class Activation {
             this._subscriptions.remove(subscription);
             this._fileDiagnostics.delete(editor);
           })
-          .subscribe(update => {
-            this._fileDiagnostics.set(editor, update.messages);
+          .subscribe(providerToMessages => {
+            this._fileDiagnostics.set(editor, providerToMessages);
           });
         this._subscriptions.add(subscription);
       }),
@@ -145,6 +157,15 @@ class Activation {
     return new UniversalDisposable(atomCommandsDisposable, () => {
       invariant(this._model.state.diagnosticUpdater === diagnosticUpdater);
       this._model.setState({diagnosticUpdater: null});
+    });
+  }
+
+  consumeGatekeeperService(service: GatekeeperService): IDisposable {
+    this._gatekeeperServices.next(service);
+    return new UniversalDisposable(() => {
+      if (this._gatekeeperServices.getValue() === service) {
+        this._gatekeeperServices.next(null);
+      }
     });
   }
 
@@ -169,6 +190,39 @@ class Activation {
     return {
       filterByActiveTextEditor,
     };
+  }
+
+  _observeDiagnosticsAndCleanUpOpenedMessageIds(): IDisposable {
+    const packageStates = this._model.toObservable();
+
+    const updaters = packageStates
+      .map(state => state.diagnosticUpdater)
+      .distinctUntilChanged();
+
+    const diagnosticMessageIdsStream = updaters
+      .switchMap(
+        updater =>
+          updater == null
+            ? Observable.of([])
+            : observableFromSubscribeFunction(updater.observeMessages),
+      )
+      .map(diagnostics => {
+        const messageIds = diagnostics
+          .map(message => message.id)
+          .filter(Boolean);
+        return new Set(messageIds);
+      })
+      .let(diffSets());
+
+    return new UniversalDisposable(
+      diagnosticMessageIdsStream.subscribe(({_, removed}) => {
+        const newOpenedMessageIds = new Set(this._model.state.openedMessageIds);
+        removed.forEach(msgId => {
+          newOpenedMessageIds.delete(msgId);
+        });
+        this._model.setState({openedMessageIds: newOpenedMessageIds});
+      }),
+    );
   }
 
   _createDiagnosticsViewModel(): DiagnosticsViewModel {
@@ -196,7 +250,6 @@ class Activation {
               : observableFromSubscribeFunction(updater.observeMessages),
         )
         .map(diagnostics => diagnostics.filter(d => d.type !== 'Hint'))
-        .let(fastDebounce(100))
         .startWith([]);
 
       const showTracesStream: Observable<
@@ -343,38 +396,85 @@ class Activation {
     editor: atom$TextEditor,
     position: atom$Point,
   ): Array<DiagnosticMessage> {
-    const messagesForFile = this._fileDiagnostics.get(editor);
-    if (messagesForFile == null) {
+    const messages = this._fileDiagnostics.get(editor);
+
+    if (messages == null) {
       return [];
     }
-    return messagesForFile.filter(
-      message => message.range != null && message.range.containsPoint(position),
-    );
-  }
-}
 
-function gutterConsumeDiagnosticUpdates(
-  diagnosticUpdater: DiagnosticUpdater,
-): IDisposable {
-  const subscriptions = new UniversalDisposable();
-  subscriptions.add(
-    observeTextEditors((editor: TextEditor) => {
-      const subscription = getEditorDiagnosticUpdates(editor, diagnosticUpdater)
-        .finally(() => {
-          subscriptions.remove(subscription);
-        })
-        .subscribe(update => {
-          // Although the subscription should be cleaned up on editor destroy,
-          // the very act of destroying the editor can trigger diagnostic updates.
-          // Thus this callback can still be triggered after the editor is destroyed.
-          if (!editor.isDestroyed()) {
-            applyUpdateToEditor(editor, update, diagnosticUpdater);
-          }
+    const messagesAtPosition = [];
+    for (const message of messages) {
+      if (message.range && message.range.end.row > position.row) {
+        break;
+      }
+      if (message.range != null && message.range.containsPoint(position)) {
+        messagesAtPosition.push(message);
+      }
+    }
+    return messagesAtPosition;
+  }
+
+  _gutterConsumeDiagnosticUpdates(
+    diagnosticUpdater: DiagnosticUpdater,
+  ): IDisposable {
+    const subscriptions = new UniversalDisposable();
+    const updateOpenedMessageIds = this._model
+      .toObservable()
+      .map(state => state.openedMessageIds)
+      .distinctUntilChanged();
+
+    this._subscriptions.add(updateOpenedMessageIds.subscribe());
+
+    const setOpenedMessageIds = openedMessageIds => {
+      this._model.setState({openedMessageIds});
+    };
+    subscriptions.add(
+      atom.workspace.observeTextEditors((editor: TextEditor) => {
+        // blockDecorationContainer is unique per editor and will get cleaned up
+        // when editor destroys and diagnostics package deactivates
+        const blockDecorationContainer = document.createElement('div');
+        editor.onDidDestroy(() => {
+          ReactDOM.unmountComponentAtNode(blockDecorationContainer);
         });
-      subscriptions.add(subscription);
-    }),
-  );
-  return subscriptions;
+        subscriptions.add(() => {
+          ReactDOM.unmountComponentAtNode(blockDecorationContainer);
+        });
+
+        const subscription = Observable.combineLatest(
+          updateOpenedMessageIds,
+          getEditorDiagnosticUpdates(editor, diagnosticUpdater),
+        )
+          .finally(() => {
+            subscriptions.remove(subscription);
+          })
+          .subscribe(
+            ([
+              openedMessageIds: Set<string>,
+              update: Map<
+                ObservableDiagnosticProvider,
+                Array<DiagnosticMessage>,
+              >,
+            ]) => {
+              // Although the subscription should be cleaned up on editor destroy,
+              // the very act of destroying the editor can trigger diagnostic updates.
+              // Thus this callback can still be triggered after the editor is destroyed.
+              if (!editor.isDestroyed()) {
+                applyUpdateToEditor(
+                  editor,
+                  update,
+                  diagnosticUpdater,
+                  blockDecorationContainer,
+                  openedMessageIds,
+                  setOpenedMessageIds,
+                );
+              }
+            },
+          );
+        subscriptions.add(subscription);
+      }),
+    );
+    return subscriptions;
+  }
 }
 
 function addAtomCommands(diagnosticUpdater: DiagnosticUpdater): IDisposable {
@@ -393,6 +493,7 @@ function addAtomCommands(diagnosticUpdater: DiagnosticUpdater): IDisposable {
 
   const openAllFilesWithErrors = () => {
     analytics.track('diagnostics-panel-open-all-files-with-errors');
+    // eslint-disable-next-line nuclide-internal/unused-subscription
     observableFromSubscribeFunction(diagnosticUpdater.observeMessages)
       .first()
       .subscribe((messages: Array<DiagnosticMessage>) => {
@@ -481,25 +582,18 @@ function getActiveEditorPaths(): Observable<?NuclideUri> {
 function getEditorDiagnosticUpdates(
   editor: atom$TextEditor,
   diagnosticUpdater: DiagnosticUpdater,
-): Observable<DiagnosticMessages> {
+): Observable<Array<DiagnosticMessage>> {
   return observableFromSubscribeFunction(editor.onDidChangePath.bind(editor))
     .startWith(editor.getPath())
     .switchMap(
       filePath =>
         filePath != null
           ? observableFromSubscribeFunction(cb =>
-              diagnosticUpdater.observeFileMessages(filePath, cb),
+              diagnosticUpdater.observeFileMessagesWithoutHints(filePath, cb),
             )
           : Observable.empty(),
     )
-    .map(diagnosticMessages => {
-      return {
-        ...diagnosticMessages,
-        messages: diagnosticMessages.messages.filter(
-          diagnostic => diagnostic.type !== 'Hint',
-        ),
-      };
-    })
+    .map(messageUpdate => messageUpdate.messages)
     .takeUntil(
       observableFromSubscribeFunction(editor.onDidDestroy.bind(editor)),
     );

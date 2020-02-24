@@ -6,7 +6,7 @@
  * LICENSE file in the root directory of this source tree. An additional grant
  * of patent rights can be found in the PATENTS file in the same directory.
  *
- * @flow
+ * @flow strict-local
  * @format
  */
 
@@ -14,8 +14,13 @@ import * as DebugProtocol from 'vscode-debugprotocol';
 import type {ConsoleIO} from './ConsoleIO';
 import type {Command} from './Command';
 
-import {DebuggerInterface} from './DebuggerInterface';
+import {
+  STACK_FRAME_FOCUS_CHANGED,
+  THREAD_FOCUS_CHANGED,
+  DebuggerInterface,
+} from './DebuggerInterface';
 import leftPad from './Format';
+import TokenizedLine from './TokenizedLine';
 
 type SourceReference = {
   source: DebugProtocol.Source,
@@ -24,7 +29,8 @@ type SourceReference = {
 
 export default class ListCommand implements Command {
   name = 'list';
-  helpText = "[line | source[:line] | @[:line]]: list source file contents. '@' may be used to refer to the source at the current stack frame.";
+  helpText =
+    "[line | source[:line] | @[:line]]: list source file contents. '@' may be used to refer to the source at the current stack frame.";
 
   detailedHelpText = `
 list [line | source[:line] | @[:line]]
@@ -61,9 +67,15 @@ current location in the ouput. Otherwise, listing will begin at the given line n
   constructor(con: ConsoleIO, debug: DebuggerInterface) {
     this._console = con;
     this._debugger = debug;
+
+    // $FlowFixMe until I figure out how to represent that debugger is an EventEmitter
+    this._debugger
+      .on(THREAD_FOCUS_CHANGED, () => this._clearHistory())
+      .on(STACK_FRAME_FOCUS_CHANGED, () => this._clearHistory());
   }
 
-  async execute(args: string[]): Promise<void> {
+  async execute(line: TokenizedLine): Promise<void> {
+    const args = line.stringTokens().slice(1);
     let ref: SourceReference;
 
     switch (args.length) {
@@ -87,6 +99,13 @@ current location in the ouput. Otherwise, listing will begin at the given line n
     }
 
     await this._printSourceLines(ref);
+  }
+
+  _clearHistory(): void {
+    // Default behavior if list is re-run is to show more source.
+    // When the current thread or stack frame changes, reset that
+    // state so the first 'list' always shows source around the stop location
+    this._source.path = '';
   }
 
   _previousSource(): DebugProtocol.Source {
@@ -185,7 +204,9 @@ current location in the ouput. Otherwise, listing will begin at the given line n
         sep = '=>';
       }
       this._console.outputLine(
-        `${leftPad(String(lineNumber), maxLength)}${sep}   ${sourceLine}`,
+        `${leftPad(String(lineNumber), maxLength)}${sep}   ${this._untabifyLine(
+          sourceLine,
+        )}`,
       );
       lineNumber++;
     }
@@ -196,9 +217,26 @@ current location in the ouput. Otherwise, listing will begin at the given line n
 
   _sourceIsEmpty(): boolean {
     return (
-      this._source.path == null &&
+      (this._source.path == null || this._source.path === '') &&
       (this._source.sourceReference == null ||
         this._source.sourceReference === 0)
     );
+  }
+
+  // the console itself does tab expansion, but it won't be right because
+  // source code is formatted as if the lines start in column 1, which they
+  // won't when we write them because of the line number prefix area.
+  _untabifyLine(line: string): string {
+    const pieces = line.split('\t');
+    if (pieces.length === 0) {
+      return '';
+    }
+    let lineOut = pieces[0];
+    for (let i = 1; i < pieces.length; i++) {
+      const piece = pieces[i];
+      const spaces = 8 - (lineOut.length % 8);
+      lineOut += ' '.repeat(spaces) + piece;
+    }
+    return lineOut;
   }
 }

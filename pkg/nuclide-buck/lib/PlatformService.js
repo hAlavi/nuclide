@@ -5,7 +5,7 @@
  * This source code is licensed under the license found in the LICENSE file in
  * the root directory of this source tree.
  *
- * @flow
+ * @flow strict-local
  * @format
  */
 
@@ -20,6 +20,8 @@ type PlatformProvider = (
   ruleType: string,
   buildTarget: string,
 ) => Observable<?PlatformGroup>;
+
+const PROVIDER_TIMEOUT = 5000; // 5s
 
 export class PlatformService {
   _registeredProviders: Array<PlatformProvider> = [];
@@ -42,26 +44,30 @@ export class PlatformService {
   ): Observable<Array<PlatformGroup>> {
     return this._providersChanged.startWith(undefined).switchMap(() => {
       const observables = this._registeredProviders.map(provider =>
-        provider(buckRoot, ruleType, buildTarget).catch(error => {
-          getLogger('nuclide-buck').error(
-            `Getting buck platform groups from ${provider.name} failed:`,
-            error,
-          );
-          return Observable.of(null);
-        }),
-      );
-      return (
-        Observable.from(observables)
-          // $FlowFixMe: type combineAll
-          .combineAll()
-          .map(platformGroups => {
-            return platformGroups
-              .filter(p => p != null)
-              .sort((a, b) =>
-                a.name.toUpperCase().localeCompare(b.name.toUpperCase()),
-              );
+        provider(buckRoot, ruleType, buildTarget)
+          .race(
+            Observable.timer(PROVIDER_TIMEOUT).switchMap(() =>
+              Observable.throw('Timed out'),
+            ),
+          )
+          .catch(error => {
+            getLogger('nuclide-buck').error(
+              `Getting buck platform groups from ${provider.name} failed:`,
+              error,
+            );
+            return Observable.of(null);
           })
+          .defaultIfEmpty(null),
       );
+      return Observable.from(observables)
+        .combineAll()
+        .map((platformGroups: Array<?PlatformGroup>) => {
+          return platformGroups
+            .filter(Boolean)
+            .sort((a, b) =>
+              a.name.toUpperCase().localeCompare(b.name.toUpperCase()),
+            );
+        });
     });
   }
 }

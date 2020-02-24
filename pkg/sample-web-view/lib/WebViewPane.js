@@ -19,7 +19,10 @@ class WebViewPane extends HTMLElement {
   _title: string;
   _subscriptions: UniversalDisposable;
   _emitter: Emitter;
-  _webview: WebviewElement;
+
+  // NB: electron-flowtype-definitions doesn't have a way to define
+  // WebViewElement yet, we just have to `any` it :-/
+  _webview: any;
 
   // When it comes to ES6 classes and HTML5 custom elements, "constructors don't really work yet":
   //
@@ -47,11 +50,12 @@ class WebViewPane extends HTMLElement {
     // running in Atom by default (which is important for security). If you want to communicate
     // between Atom and the webview, you can use webview's API.
 
-    const webview = ((document.createElement('webview'): any): WebviewElement);
+    const webview: any = document.createElement('webview');
 
     this._webview = webview;
 
     webview.addEventListener('page-title-set', (event: Event) => {
+      // $FlowFixMe(>=0.68.0) Flow suppress (T27187857)
       if (typeof event.title === 'string') {
         this._title = event.title;
         this._emitter.emit('did-change-title');
@@ -61,7 +65,7 @@ class WebViewPane extends HTMLElement {
     // Unfortunately, page-title-set never seems to fire, so we listen for frame loads and update
     // the title based on those instead.
     webview.addEventListener('did-frame-finish-load', (event: Event) => {
-      // flowlint-next-line sketchy-null-mixed:off
+      // $FlowFixMe(>=0.68.0) Flow suppress (T27187857)
       if (event.isMainFrame) {
         this._title = webview.getTitle();
         this._emitter.emit('did-change-title');

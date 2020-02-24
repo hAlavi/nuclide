@@ -13,11 +13,16 @@
 import invariant from 'assert';
 import {arrayEqual} from './collection';
 
-type memoizeUntilChanged = (<A, B, C, D, R, U>(
-  func: (A, B, C, D) => R,
-  keySelector_?: (A, B, C, D) => U,
+type memoizeUntilChanged = (<A, B, C, D, E, R, U>(
+  func: (A, B, C, D, E) => R,
+  keySelector_?: (A, B, C, D, E) => U,
   compareKeys_?: (U, U) => boolean,
-) => (A, B, C, D) => R) &
+) => (A, B, C, D, E) => R) &
+  (<A, B, C, D, R, U>(
+    func: (A, B, C, D) => R,
+    keySelector_?: (A, B, C, D) => U,
+    compareKeys_?: (U, U) => boolean,
+  ) => (A, B, C, D) => R) &
   (<A, B, C, R, U>(
     func: (A, B, C) => R,
     keySelector_?: (A, B, C) => U,
@@ -87,11 +92,9 @@ export default ((func, keySelector_?, compareKeys_?) => {
   let prevResult;
   const keySelector = keySelector_ || DEFAULT_KEY_SELECTOR;
   const compareKeys = compareKeys_ || arrayEqual;
-  // $FlowIssue: Flow can't express that we want the args to be the same type as the input func's.
   return function(...args) {
     const key = (keySelector: Function)(...args);
     invariant(key != null, 'Key cannot be null');
-    // $FlowIssue: We can't tell Flow the relationship between keySelector and compareKeys
     if (prevKey == null || !compareKeys(key, prevKey)) {
       prevKey = key;
       prevResult = (func: Function).apply(this, args);
